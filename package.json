@@ -1,0 +1,28 @@
+{
+  "name": "hq-mcp",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.15.0",
+  "engines": { "node": ">=22.12" },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "typecheck": "turbo run typecheck",
+    "clean": "turbo run clean && rm -rf .turbo coverage reports",
+    "setup": "tsx --conditions development apps/setup/src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:cov": "vitest run --coverage",
+    "test:guards": "vitest run --config vitest.guards.config.ts",
+    "probe:stands": "tsx --conditions development --env-file-if-exists=.env scripts/probe-stands.ts"
+  },
+  "devDependencies": {
+    "@hq/redact": "workspace:*",
+    "@types/node": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "tsx": "catalog:",
+    "turbo": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

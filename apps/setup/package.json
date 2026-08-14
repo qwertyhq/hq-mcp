@@ -1,0 +1,29 @@
+{
+  "name": "@hq/setup",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "hq-mcp-setup": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.json && chmod +x dist/index.js",
+    "start": "tsx --conditions development src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@hq/env": "workspace:*",
+    "@hq/registry": "workspace:*",
+    "@hq/runtime": "workspace:*",
+    "@hq/shm": "workspace:*",
+    "@hq/tools-read": "workspace:*",
+    "@hq/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

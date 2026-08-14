@@ -1,0 +1,25 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "tsBuildInfoFile": "./dist/.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "node_modules", "src/**/*.test.ts", "src/testing.ts"],
+  "references": [
+    { "path": "../../packages/types" },
+    { "path": "../../packages/env" },
+    { "path": "../../packages/budget" },
+    { "path": "../../packages/redact" },
+    { "path": "../../packages/registry" },
+    { "path": "../../packages/shm" },
+    { "path": "../../packages/remna" },
+    { "path": "../../packages/exec" },
+    { "path": "../../packages/audit" },
+    { "path": "../../packages/confirm" },
+    { "path": "../../packages/runtime" },
+    { "path": "../../tools/read" },
+    { "path": "../../tools/mutations" }
+  ]
+}

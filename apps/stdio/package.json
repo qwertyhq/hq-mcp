@@ -1,0 +1,29 @@
+{
+  "name": "@hq/stdio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "hq-mcp-stdio": "./dist/index.js" },
+  "scripts": {
+    "build": "tsc -b tsconfig.json && chmod +x dist/index.js",
+    "dev": "tsx watch --conditions development --env-file-if-exists=../../.env src/index.ts",
+    "start": "node --env-file-if-exists=../../.env dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@hq/env": "workspace:*",
+    "@hq/exec": "workspace:*",
+    "@hq/registry": "workspace:*",
+    "@hq/runtime": "workspace:*",
+    "@hq/types": "workspace:*",
+    "@modelcontextprotocol/sdk": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

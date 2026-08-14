@@ -1,0 +1,24 @@
+packages:
+  - "packages/*"
+  - "apps/*"
+  - "tools/*"
+
+# pnpm 10 по умолчанию НЕ выполняет postinstall зависимостей.
+# esbuild (его тянут vitest/tsx) без этого не доустановит бинарь.
+onlyBuiltDependencies:
+  - esbuild
+
+# Каталог версий — РОВНО эти записи, включая hono для apps/http из плана 3.
+# Заполняется здесь и только здесь: план 3 пишет "catalog:" и падает
+# с ERR_PNPM_CATALOG_ENTRY_NOT_FOUND, если записи тут нет.
+catalog:
+  "@modelcontextprotocol/sdk": ^1.30.0
+  "@types/node": ^22.20.1
+  "@vitest/coverage-v8": ^3.2.7
+  tsx: ^4.23.11
+  turbo: ^2.10.9
+  typescript: 5.9.3
+  vitest: ^3.2.7
+  zod: ^4.4.3
+  hono: ^4.13.1
+  "@hono/node-server": ^2.1.0

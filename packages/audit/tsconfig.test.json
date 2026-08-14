@@ -1,0 +1,21 @@
+{
+  "extends": "../../tsconfig.test-base.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "baseUrl": "../..",
+    "paths": {
+      "@hq/types": ["packages/types/src/index.ts"],
+      "@hq/env": ["packages/env/src/index.ts"],
+      "@hq/redact": ["packages/redact/src/index.ts"],
+      "@hq/budget": ["packages/budget/src/index.ts"],
+      "@hq/shm": ["packages/shm/src/index.ts"],
+      "@hq/remna": ["packages/remna/src/index.ts"],
+      "@hq/registry": ["packages/registry/src/index.ts"],
+      "@hq/exec": ["packages/exec/src/index.ts"],
+      "@hq/audit": ["packages/audit/src/index.ts"],
+      "@hq/runtime": ["packages/runtime/src/index.ts"],
+      "@hq/tools-read": ["tools/read/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}
