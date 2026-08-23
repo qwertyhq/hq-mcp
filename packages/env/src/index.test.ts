@@ -1,4 +1,13 @@
 import { spawnSync } from 'node:child_process';
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ConfigError, backendPresence, loadConfig } from './index.js';
 
@@ -9,7 +18,130 @@ const base: NodeJS.ProcessEnv = {
   REMNA_API_TOKEN: 'jwt-token',
 };
 
+function withSecretDir(run: (dir: string) => void): void {
+  const dir = mkdtempSync(join(tmpdir(), 'hq-mcp-secret-'));
+  try {
+    run(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function caughtConfigError(run: () => unknown): ConfigError {
+  try {
+    run();
+  } catch (error: unknown) {
+    expect(error).toBeInstanceOf(ConfigError);
+    return error as ConfigError;
+  }
+  throw new Error('expected ConfigError');
+}
+
 describe('loadConfig', () => {
+  describe('protected backend secret files', () => {
+    it('loads both backend credentials from mode-0600 regular files', () => {
+      withSecretDir((dir) => {
+        const shm = join(dir, 'shm_admin_auth');
+        const remna = join(dir, 'remna_api_token');
+        writeFileSync(shm, 'mcp:file-password\n', { mode: 0o600 });
+        writeFileSync(remna, 'file-remna-token-0123456789\n', { mode: 0o600 });
+        const env = { ...base };
+        delete env.SHM_ADMIN_AUTH;
+        delete env.REMNA_API_TOKEN;
+        env.SHM_ADMIN_AUTH_FILE = shm;
+        env.REMNA_API_TOKEN_FILE = remna;
+
+        const cfg = loadConfig(env);
+        expect(cfg.shm?.auth).toBe('mcp:file-password');
+        expect(cfg.remna?.token).toBe('file-remna-token-0123456789');
+      });
+    });
+
+    it('treats a credential _FILE as backend presence and reports the missing base URL', () => {
+      withSecretDir((dir) => {
+        const shm = join(dir, 'shm_admin_auth');
+        writeFileSync(shm, 'mcp:file-password\n', { mode: 0o600 });
+        const error = caughtConfigError(() =>
+          loadConfig({ SHM_ADMIN_AUTH_FILE: shm } as NodeJS.ProcessEnv),
+        );
+        expect(error.variable).toBe('SHM_BASE_URL');
+        expect(error.message).toMatch(/^Missing required environment variable SHM_BASE_URL/);
+      });
+    });
+
+    it('rejects direct and file sources together without exposing either value', () => {
+      withSecretDir((dir) => {
+        const shm = join(dir, 'shm_admin_auth');
+        const fileValue = 'example-file-password-0123456789';
+        writeFileSync(shm, `${fileValue}\n`, { mode: 0o600 });
+        const env = { ...base };
+        env.SHM_ADMIN_AUTH_FILE = shm;
+        const error = caughtConfigError(() => loadConfig(env));
+        expect(error.variable).toBe('SHM_ADMIN_AUTH');
+        expect(error.message).not.toContain(fileValue);
+        expect(error.message).not.toContain(base.SHM_ADMIN_AUTH);
+        expect(error.message).not.toContain(shm);
+      });
+    });
+
+    it.each([
+      ['empty file', 'Secret file is empty', (dir: string) => {
+        const path = join(dir, 'empty');
+        writeFileSync(path, ' \n', { mode: 0o600 });
+        return path;
+      }],
+      ['missing file', 'Cannot read protected secret file', (dir: string) => join(dir, 'missing')],
+      ['directory', 'Protected secret file required', (dir: string) => {
+        const path = join(dir, 'directory');
+        mkdirSync(path, { mode: 0o700 });
+        return path;
+      }],
+      ['symlink', 'Protected secret file required', (dir: string) => {
+        const target = join(dir, 'target');
+        const path = join(dir, 'link');
+        writeFileSync(target, 'example-file-password-0123456789\n', { mode: 0o600 });
+        symlinkSync(target, path);
+        return path;
+      }],
+      ['group-readable file', 'Protected secret file required', (dir: string) => {
+        const path = join(dir, 'group-readable');
+        writeFileSync(path, 'example-file-password-0123456789\n', { mode: 0o640 });
+        return path;
+      }],
+      ['world-readable file', 'Protected secret file required', (dir: string) => {
+        const path = join(dir, 'world-readable');
+        writeFileSync(path, 'example-file-password-0123456789\n', { mode: 0o644 });
+        return path;
+      }],
+      ['non-0600 owner-only file', 'Protected secret file required', (dir: string) => {
+        const path = join(dir, 'owner-read-only');
+        writeFileSync(path, 'example-file-password-0123456789\n', { mode: 0o400 });
+        return path;
+      }],
+    ] as const)('rejects a %s with a base-name-only ConfigError', (_case, message, makePath) => {
+      withSecretDir((dir) => {
+        const env: NodeJS.ProcessEnv = {
+          ...base,
+          ['SHM_ADMIN_AUTH_FILE']: makePath(dir),
+        };
+        delete env.SHM_ADMIN_AUTH;
+        const error = caughtConfigError(() => loadConfig(env));
+        expect(error.variable).toBe('SHM_ADMIN_AUTH');
+        expect(error.message).toContain(message);
+        expect(error.message).not.toContain(env.SHM_ADMIN_AUTH_FILE ?? 'impossible');
+        expect(error.message).not.toContain('example-file-password-0123456789');
+      });
+    });
+
+    it('treats a whitespace-only _FILE as absent', () => {
+      const env = { ...base };
+      delete env.SHM_ADMIN_AUTH;
+      env.SHM_ADMIN_AUTH_FILE = '   ';
+      const error = caughtConfigError(() => loadConfig(env));
+      expect(error.variable).toBe('SHM_ADMIN_AUTH');
+    });
+  });
+
   it('fills defaults and strips the trailing slash from base urls', () => {
     const cfg = loadConfig(base);
     expect(cfg.shm?.baseUrl).toBe('https://billing.example.com/shm/v1');

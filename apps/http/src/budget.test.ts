@@ -7,7 +7,10 @@ import { createApp } from './app.js';
 import { Metrics } from './metrics.js';
 import { AUTH_HEADERS, fakeCtx, FIXED_NOW, TEST_TOKENS } from './testing.js';
 
-function appWithBudget(limit: number): { app: ReturnType<typeof createApp>; metrics: Metrics } {
+function appWithBudget(
+  limit: number,
+  profile: 'human' | 'bot' = 'bot',
+): { app: ReturnType<typeof createApp>; metrics: Metrics } {
   const probeTool: ToolDef = {
     name: 'platform_probe',
     description: 'cheap read; budget is taken by the transport, not by the handler',
@@ -20,11 +23,13 @@ function appWithBudget(limit: number): { app: ReturnType<typeof createApp>; metr
   const metrics = new Metrics({ now: FIXED_NOW });
   const app = createApp({
     registry: createRegistry([probeTool]),
-    ctx: fakeCtx(),
+    ctx: fakeCtx({ profile }),
     budget: new Budget({ limit, windowMs: 60_000, now: FIXED_NOW }),
     tokens: TEST_TOKENS,
     metrics,
     version: 'test',
+    imageRevision: '0000000000000000000000000000000000000000',
+    deploymentConfigRevision: '11111111-1111-4111-8111-111111111111',
   });
   return { app, metrics };
 }
@@ -95,7 +100,7 @@ describe('budget denials', () => {
   });
 
   it('отказы по бюджету видны в /metrics отдельным счётчиком', async () => {
-    const { app, metrics } = appWithBudget(2);
+    const { app, metrics } = appWithBudget(2, 'human');
     await probe(app);
     await probe(app);
     await probe(app);

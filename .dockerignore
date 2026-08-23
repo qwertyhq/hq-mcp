@@ -1,0 +1,14 @@
+.git
+.env*
+.hq-mcp
+node_modules
+**/node_modules
+**/dist
+coverage
+reports
+.turbo
+**/.turbo
+**/*.tsbuildinfo
+**/*.test.ts
+**/*.spec.ts
+**/tsconfig.test.json

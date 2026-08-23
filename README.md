@@ -263,6 +263,33 @@ HQ_MCP_HTTP_TOKENS='<label>:<token>' pnpm --filter @hq/http start
 Соседний `/v1/tools` — не MCP, а внутренний REST-фасад для ai-bot: одна ручка
 списка и одна на вызов, со своим конвертом ответа и своим потолком запросов.
 
+### Production HTTP image
+
+Production-образ собирается только из проверенного 40-символьного lowercase
+commit SHA. Этот SHA запечатывается одновременно в OCI label, root-owned
+read-only файл и `/healthz`; entrypoint восстанавливает значение из файла, так
+что runtime-переопределение `HQ_MCP_IMAGE_REVISION` не меняет health evidence.
+
+```bash
+pnpm test && pnpm test:guards && pnpm typecheck && pnpm build
+HQ_MCP_COMMIT_SHA="$(git rev-parse HEAD)"
+test "${#HQ_MCP_COMMIT_SHA}" -eq 40
+docker build --build-arg "HQ_MCP_DEPLOYMENT_REVISION=${HQ_MCP_COMMIT_SHA}" --tag "hq-mcp-http:${HQ_MCP_COMMIT_SHA}" .
+scripts/http-container-smoke.sh "hq-mcp-http:${HQ_MCP_COMMIT_SHA}"
+```
+
+Compose-потребитель фиксирует именно этот 40-символьный tag и не объявляет
+host `ports`. Контейнер работает как UID/GID `10001`, в `bot+ro` публикует
+только `/healthz` и REST-фасад и требует общий non-secret
+`HQ_MCP_DEPLOYMENT_CONFIG_REVISION` в формате lowercase UUID. В health входят
+обе revision, чтобы ai-bot мог закрыться до чтения каталога при несовпадении.
+
+Production передаёт секреты только через три regular non-symlink файла с
+точным mode `0600`: `SHM_ADMIN_AUTH_FILE`, `REMNA_API_TOKEN_FILE` и
+`HQ_MCP_HTTP_TOKENS_FILE`. Последний содержит только
+`ai-bot:<dedicated token>`. Это отдельный токен сервера; креды SHM и Remnawave
+тоже выделяются этому deployment отдельно и не переиспользуются из support bot.
+
 ### Подгонка под свою установку
 
 Апстримный `danuk/shm` не знает слова «Remnawave» — ни строки. Мост между

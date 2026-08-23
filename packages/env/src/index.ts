@@ -1,3 +1,4 @@
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs';
 import { isAccess, isProfile } from '@hq/types';
 import type { Access, Backend, BackendPresence, Profile, TunnelConfig } from '@hq/types';
 
@@ -14,6 +15,16 @@ export const REMNA_VARIABLES: readonly string[] = ['REMNA_BASE_URL', 'REMNA_API_
 export const BACKEND_VARIABLES: Readonly<Record<Backend, readonly string[]>> = {
   shm: SHM_VARIABLES,
   remna: REMNA_VARIABLES,
+};
+
+export type FileBackedSecretName =
+  | 'SHM_ADMIN_AUTH'
+  | 'REMNA_API_TOKEN'
+  | 'HQ_MCP_HTTP_TOKENS';
+
+const BACKEND_FILE_SOURCE: Readonly<Record<Backend, FileBackedSecretName>> = {
+  shm: 'SHM_ADMIN_AUTH',
+  remna: 'REMNA_API_TOKEN',
 };
 
 export interface HqMcpConfig {
@@ -107,6 +118,86 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
     throw new ConfigError(
       name,
       `Missing required environment variable ${name}. ${HINTS[name] ?? ''}`.trim(),
+    );
+  }
+  return value;
+}
+
+function protectedSecretFileError(name: FileBackedSecretName): ConfigError {
+  return new ConfigError(
+    name,
+    `Protected secret file required for ${name}: use a regular, non-symlink file with mode 0600.`,
+  );
+}
+
+/**
+ * Reads one of the deliberately small, fixed set of deploy-time secrets.
+ *
+ * The path and secret never appear in an error. The descriptor is opened with
+ * O_NOFOLLOW and then checked again so a path swap between lstat and open
+ * cannot turn a checked file into a symlink or a different regular file.
+ */
+export function readFileBackedSecret(
+  env: NodeJS.ProcessEnv,
+  name: FileBackedSecretName,
+): string | undefined {
+  const direct = env[name]?.trim();
+  const fileVariable = `${name}_FILE`;
+  const path = env[fileVariable]?.trim();
+
+  if (direct !== undefined && direct !== '' && path !== undefined && path !== '') {
+    throw new ConfigError(
+      name,
+      `Set exactly one of ${name} or ${fileVariable}; both are present.`,
+    );
+  }
+  if (direct !== undefined && direct !== '') return direct;
+  if (path === undefined || path === '') return undefined;
+
+  let descriptor: number | undefined;
+  try {
+    const pathStat = lstatSync(path);
+    if (
+      pathStat.isSymbolicLink() ||
+      !pathStat.isFile() ||
+      (pathStat.mode & 0o777) !== 0o600
+    ) {
+      throw protectedSecretFileError(name);
+    }
+
+    descriptor = openSync(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const descriptorStat = fstatSync(descriptor);
+    if (
+      !descriptorStat.isFile() ||
+      (descriptorStat.mode & 0o777) !== 0o600 ||
+      descriptorStat.dev !== pathStat.dev ||
+      descriptorStat.ino !== pathStat.ino
+    ) {
+      throw protectedSecretFileError(name);
+    }
+
+    const value = readFileSync(descriptor, 'utf8').trim();
+    if (value === '') {
+      throw new ConfigError(name, `Secret file is empty for ${name}.`);
+    }
+    return value;
+  } catch (error: unknown) {
+    if (error instanceof ConfigError) throw error;
+    throw new ConfigError(name, `Cannot read protected secret file for ${name}.`);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function requiredFileBackedSecret(env: NodeJS.ProcessEnv, name: FileBackedSecretName): string {
+  const value = readFileBackedSecret(env, name);
+  if (value === undefined) {
+    throw new ConfigError(
+      name,
+      `Missing required environment variable ${name} (or ${name}_FILE). ${HINTS[name] ?? ''}`.trim(),
     );
   }
   return value;
@@ -250,7 +341,10 @@ function isSet(env: NodeJS.ProcessEnv, name: string): boolean {
  * бы нигде. Опечатка в имени переменной — это ошибка, а не выбор развёртывания.
  */
 function wants(env: NodeJS.ProcessEnv, backend: Backend): boolean {
-  return BACKEND_VARIABLES[backend].some((name) => isSet(env, name));
+  return (
+    BACKEND_VARIABLES[backend].some((name) => isSet(env, name)) ||
+    isSet(env, `${BACKEND_FILE_SOURCE[backend]}_FILE`)
+  );
 }
 
 const NO_BACKEND_MESSAGE =
@@ -299,7 +393,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): HqMcpConfig {
 
   let shm: HqMcpConfig['shm'] = null;
   if (wantsShm) {
-    shm = { baseUrl: url(env, 'SHM_BASE_URL'), auth: required(env, 'SHM_ADMIN_AUTH') };
+    shm = {
+      baseUrl: url(env, 'SHM_BASE_URL'),
+      auth: requiredFileBackedSecret(env, 'SHM_ADMIN_AUTH'),
+    };
     const publicSecret = env.SHM_PUBLIC_SECRET?.trim();
     if (publicSecret !== undefined && publicSecret !== '') {
       // exactOptionalPropertyTypes: поле выставляется только когда значение есть.
@@ -338,7 +435,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): HqMcpConfig {
   return {
     shm,
     remna: wantsRemna
-      ? { baseUrl: url(env, 'REMNA_BASE_URL'), token: required(env, 'REMNA_API_TOKEN') }
+      ? {
+          baseUrl: url(env, 'REMNA_BASE_URL'),
+          token: requiredFileBackedSecret(env, 'REMNA_API_TOKEN'),
+        }
       : null,
     mode: modeRaw,
     profile: profileRaw,

@@ -1,8 +1,21 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ConfigError } from '@hq/env';
 import { DEFAULT_HTTP_PORT, loadHttpConfig } from './config.js';
 
 const base = { HQ_MCP_HTTP_TOKENS: 'example:0123456789abcdef01234567' } as NodeJS.ProcessEnv;
+const imageRevision = '0000000000000000000000000000000000000000';
+const deploymentConfigRevision = '11111111-1111-4111-8111-111111111111';
+
+const bot = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
+  ...base,
+  HQ_MCP_PROFILE: 'bot',
+  HQ_MCP_IMAGE_REVISION: imageRevision,
+  HQ_MCP_DEPLOYMENT_CONFIG_REVISION: deploymentConfigRevision,
+  ...over,
+});
 
 describe('loadHttpConfig', () => {
   it('падает без токенов: сервер без аутентификации не поднимаем', () => {
@@ -17,6 +30,56 @@ describe('loadHttpConfig', () => {
     expect(cfg.host).toBe('127.0.0.1');
     expect(cfg.port).toBe(DEFAULT_HTTP_PORT);
     expect(cfg.rawTokens).toBe('example:0123456789abcdef01234567');
+    expect(cfg.imageRevision).toBeNull();
+    expect(cfg.deploymentConfigRevision).toBeNull();
+  });
+
+  it('читает HTTP-токены из защищённого файла и не допускает двух источников', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hq-mcp-http-secret-'));
+    try {
+      const path = join(dir, 'http_tokens');
+      writeFileSync(path, 'ai-bot:example-file-token-0123456789abcdef\n', { mode: 0o600 });
+      expect(
+        loadHttpConfig({ HQ_MCP_HTTP_TOKENS_FILE: path } as NodeJS.ProcessEnv).rawTokens,
+      ).toBe('ai-bot:example-file-token-0123456789abcdef');
+
+      const error = (() => {
+        try {
+          loadHttpConfig({ ...base, HQ_MCP_HTTP_TOKENS_FILE: path });
+        } catch (caught: unknown) {
+          return caught;
+        }
+        throw new Error('expected conflicting token sources to fail');
+      })();
+      expect(error).toBeInstanceOf(ConfigError);
+      expect((error as ConfigError).variable).toBe('HQ_MCP_HTTP_TOKENS');
+      expect((error as Error).message).not.toContain(path);
+      expect((error as Error).message).not.toContain('example-file-token');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('bot-профиль требует обе канонические revision до старта', () => {
+    expect(loadHttpConfig(bot())).toMatchObject({ imageRevision, deploymentConfigRevision });
+
+    for (const [name, value] of [
+      ['HQ_MCP_IMAGE_REVISION', undefined],
+      ['HQ_MCP_IMAGE_REVISION', 'ABCDEF0000000000000000000000000000000000'],
+      ['HQ_MCP_DEPLOYMENT_CONFIG_REVISION', undefined],
+      ['HQ_MCP_DEPLOYMENT_CONFIG_REVISION', '11111111-1111-4111-8111-11111111111A'],
+    ] as const) {
+      const broken = bot();
+      if (value === undefined) delete broken[name];
+      else broken[name] = value;
+      try {
+        loadHttpConfig(broken);
+        throw new Error(`expected ${name} to fail`);
+      } catch (error: unknown) {
+        expect(error).toBeInstanceOf(ConfigError);
+        expect((error as ConfigError).variable).toBe(name);
+      }
+    }
   });
 
   it('читает переопределения из окружения', () => {
@@ -29,6 +92,8 @@ describe('loadHttpConfig', () => {
       host: '0.0.0.0',
       port: 9001,
       rawTokens: 'example:0123456789abcdef01234567',
+      imageRevision: null,
+      deploymentConfigRevision: null,
     });
   });
 
@@ -71,7 +136,13 @@ describe('loadHttpConfig', () => {
       HQ_MCP_HTTP_BUDGET_LIMIT: '9999',
       HQ_MCP_HTTP_BUDGET_WINDOW_MS: '1',
     } as NodeJS.ProcessEnv);
-    expect(Object.keys(cfg).sort()).toEqual(['host', 'port', 'rawTokens']);
+    expect(Object.keys(cfg).sort()).toEqual([
+      'deploymentConfigRevision',
+      'host',
+      'imageRevision',
+      'port',
+      'rawTokens',
+    ]);
     expect(JSON.stringify(cfg)).not.toContain('9999');
   });
 });

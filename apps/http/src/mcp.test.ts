@@ -8,7 +8,11 @@ import type { ToolDef } from '@hq/types';
 import type { Hono } from 'hono';
 import { createApp, MAX_BODY_BYTES } from './app.js';
 import type { AppDeps, AppEnv } from './app.js';
-import { AUTH_HEADERS, fakeDeps } from './testing.js';
+import { AUTH_HEADERS, fakeCtx, fakeDeps as makeFakeDeps } from './testing.js';
+
+function fakeDeps(over: Partial<AppDeps> = {}): AppDeps {
+  return makeFakeDeps({ ctx: fakeCtx({ profile: 'human' }), ...over });
+}
 
 const MCP_URL = 'http://127.0.0.1/mcp';
 
@@ -65,14 +69,15 @@ describe('POST /mcp — настоящий клиент MCP', () => {
     await client.close();
   });
 
-  it('tools/list отдаёт ровно то, что показывает listVisibleTools', async () => {
+  it('keeps native MCP available to the human profile', async () => {
     const app = createApp(fakeDeps());
     const { client } = await connect(app);
     const listing = (await client.listTools()) as ToolListing;
-    expect(listing.tools.map((t) => t.name).sort()).toEqual(['client_overview', 'spool_inspect']);
-    // sql_query объявлен только для профиля human — по MCP его не видно так же,
-    // как по REST и по stdio: срез считает одна функция из @hq/exec.
-    expect(listing.tools.map((t) => t.name)).not.toContain('sql_query');
+    expect(listing.tools.map((t) => t.name).sort()).toEqual([
+      'client_overview',
+      'spool_inspect',
+      'sql_query',
+    ]);
     const overview = listing.tools.find((t) => t.name === 'client_overview');
     expect((overview?.inputSchema.properties as Record<string, unknown>).query).toBeDefined();
     await client.close();
@@ -88,11 +93,12 @@ describe('POST /mcp — настоящий клиент MCP', () => {
     expect(result.isError).toBeFalsy();
     const text = JSON.stringify(result);
     expect(text).toContain('3073');
-    // Редакцию делает executeTool по ctx.profile — тот же слой, что на stdio.
+    // Редакцию делает executeTool по human-профилю — тот же слой, что на stdio.
     // Своего второго прохода у этого маршрута нет намеренно: иначе один и тот же
     // инструмент в одном профиле отвечал бы по stdio и по /mcp по-разному.
     expect(text).not.toContain('p@ssw0rd');
     expect(text).not.toContain('AbCdEf12');
+    expect(text).toContain('client@example.com');
     // Вызов виден в /metrics: без этого auth.ok рос бы, а totals.calls стоял.
     const snapshot = deps.metrics.snapshot();
     expect(snapshot.totals.calls).toBe(1);
@@ -121,10 +127,9 @@ describe('POST /mcp — настоящий клиент MCP', () => {
   it('неизвестное имя инструмента — отказ SDK, реестр по-прежнему не виден', async () => {
     const deps = fakeDeps();
     const { client } = await connect(createApp(deps));
-    const unknown = await client.callTool({ name: 'sql_query', arguments: { sql: 'select 1' } });
+    const unknown = await client.callTool({ name: 'missing_tool', arguments: {} });
     expect(unknown.isError).toBe(true);
-    // Имя, объявленное только для профиля human, для этого сервера просто не
-    // существует — ровно как на stdio и на REST.
+    // Неизвестное имя не вызывает ни один handler — ровно как на stdio и REST.
     expect(deps.metrics.snapshot().totals.calls).toBe(0);
     await client.close();
   });
@@ -309,8 +314,8 @@ describe('/mcp — методы и протокольные ошибки', () =>
     // тогда, когда сервер и транспорт перестали быть свежими на запрос.
     const app = createApp(fakeDeps());
     const { client } = await connect(app);
-    expect(((await client.listTools()) as ToolListing).tools).toHaveLength(2);
-    expect(((await client.listTools()) as ToolListing).tools).toHaveLength(2);
+    expect(((await client.listTools()) as ToolListing).tools).toHaveLength(3);
+    expect(((await client.listTools()) as ToolListing).tools).toHaveLength(3);
     const called = await client.callTool({
       name: 'spool_inspect',
       arguments: {},

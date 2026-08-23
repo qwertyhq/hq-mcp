@@ -135,6 +135,8 @@ export function fakeDeps(over: Partial<AppDeps> = {}): AppDeps {
     tokens: TEST_TOKENS,
     metrics: new Metrics({ now: FIXED_NOW }),
     version: 'test',
+    imageRevision: '0000000000000000000000000000000000000000',
+    deploymentConfigRevision: '11111111-1111-4111-8111-111111111111',
     ...over,
   };
 }

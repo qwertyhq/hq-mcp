@@ -1,4 +1,4 @@
-import { ConfigError } from '@hq/env';
+import { ConfigError, readFileBackedSecret } from '@hq/env';
 
 export const DEFAULT_HTTP_PORT = 42480;
 
@@ -18,7 +18,15 @@ export interface HttpServerConfig {
   port: number;
   /** Сырое значение HQ_MCP_HTTP_TOKENS; разбирается в auth.parseTokens. */
   rawTokens: string;
+  /** Build-time commit evidence, mandatory only for the production bot profile. */
+  imageRevision: string | null;
+  /** Shared non-secret deployment revision, mandatory only for the bot profile. */
+  deploymentConfigRevision: string | null;
 }
+
+const IMAGE_REVISION_RE = /^[a-f0-9]{40}$/;
+const DEPLOYMENT_CONFIG_REVISION_RE =
+  /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 
 function readInt(
   env: NodeJS.ProcessEnv,
@@ -40,13 +48,34 @@ function readInt(
 }
 
 export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpServerConfig {
-  const rawTokens = (env.HQ_MCP_HTTP_TOKENS ?? '').trim();
-  if (rawTokens === '') {
+  const rawTokens = readFileBackedSecret(env, 'HQ_MCP_HTTP_TOKENS');
+  if (rawTokens === undefined) {
     throw new ConfigError(
       'HQ_MCP_HTTP_TOKENS',
-      'HQ_MCP_HTTP_TOKENS is empty: refusing to start an unauthenticated server. ' +
+      'HQ_MCP_HTTP_TOKENS (or HQ_MCP_HTTP_TOKENS_FILE) is empty: refusing to start an unauthenticated server. ' +
         'Expected "<label>:<token>[,<label>:<token>]".',
     );
+  }
+
+  const profile = env.HQ_MCP_PROFILE?.trim() ?? 'human';
+  let imageRevision: string | null = null;
+  let deploymentConfigRevision: string | null = null;
+  if (profile === 'bot') {
+    imageRevision = env.HQ_MCP_IMAGE_REVISION?.trim() ?? '';
+    if (!IMAGE_REVISION_RE.test(imageRevision)) {
+      throw new ConfigError(
+        'HQ_MCP_IMAGE_REVISION',
+        'HQ_MCP_IMAGE_REVISION must be the exact 40-character lowercase commit SHA baked into the image.',
+      );
+    }
+
+    deploymentConfigRevision = env.HQ_MCP_DEPLOYMENT_CONFIG_REVISION?.trim() ?? '';
+    if (!DEPLOYMENT_CONFIG_REVISION_RE.test(deploymentConfigRevision)) {
+      throw new ConfigError(
+        'HQ_MCP_DEPLOYMENT_CONFIG_REVISION',
+        'HQ_MCP_DEPLOYMENT_CONFIG_REVISION must be a canonical lowercase UUID.',
+      );
+    }
   }
   // Дефолт — loopback, и это не вкус: снаружи HTTP-контур ходит через reverse proxy
   // того же хоста. Значение 0.0.0.0 оператор обязан написать руками и увидеть, что
@@ -57,5 +86,7 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpServer
     host,
     port: readInt(env, 'HQ_MCP_HTTP_PORT', DEFAULT_HTTP_PORT, 1, 65_535),
     rawTokens,
+    imageRevision,
+    deploymentConfigRevision,
   };
 }
