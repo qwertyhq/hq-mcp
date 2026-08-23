@@ -26,7 +26,11 @@ export interface ShmUserMatch {
   telegram_id: number | null;
   balance: number | null;
   blocked: boolean;
+  matchedBy?: ShmMatchedBy;
+  exact?: boolean;
 }
+
+export type ShmMatchedBy = 'shm_user_id' | 'telegram_id' | 'login' | 'email' | null;
 
 /**
  * Идентификатор пользователя панели в Remnawave 3.x — ЧИСЛО. Поля `uuid` у
@@ -94,10 +98,30 @@ function exactness(match: ShmUserMatch, q: string, numeric: boolean): number {
   return 3;
 }
 
+function matchedBy(match: ShmUserMatch, q: string, numeric: boolean): ShmMatchedBy {
+  const wanted = q.toLowerCase();
+  const login = match.login?.toLowerCase() ?? null;
+  const email = match.email?.toLowerCase() ?? null;
+  if (numeric && match.user_id === Number(q)) return 'shm_user_id';
+  if (numeric && (match.telegram_id === Number(q) || login === `@${wanted}`)) {
+    return 'telegram_id';
+  }
+  if (login === wanted) return 'login';
+  if (email === wanted) return 'email';
+  return null;
+}
+
 /** Сортировка устойчивая: внутри одной точности порядок SHM сохраняется. */
 function byExactness(matches: ShmUserMatch[], q: string, numeric: boolean): ShmUserMatch[] {
   return matches
-    .map((match, index) => ({ match, index, rank: exactness(match, q, numeric) }))
+    .map((match, index) => {
+      const evidence = matchedBy(match, q, numeric);
+      return {
+        match: { ...match, matchedBy: evidence, exact: evidence !== null },
+        index,
+        rank: exactness(match, q, numeric),
+      };
+    })
     .sort((a, b) => a.rank - b.rank || a.index - b.index)
     .map((one) => one.match);
 }

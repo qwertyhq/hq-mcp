@@ -4,7 +4,7 @@ import { BudgetExceededError } from '@hq/budget';
 import { executeTool, listVisibleTools } from '@hq/exec';
 import type { ToolOutcome } from '@hq/exec';
 import type { AppDeps, AppEnv } from './app.js';
-import { MAX_BODY_BYTES } from './app.js';
+import { BOT_MAX_BODY_BYTES, MAX_BODY_BYTES } from './app.js';
 import { redactBotStrict, redactMessage } from './redactBot.js';
 import { toJsonSchema } from './schema.js';
 
@@ -46,6 +46,35 @@ function fail(
   );
 }
 
+export class RequestBodyTooLarge extends Error {
+  constructor(readonly maxBytes: number) {
+    super(`request body exceeds ${String(maxBytes)} bytes`);
+    this.name = 'RequestBodyTooLarge';
+  }
+}
+
+export async function readRequestBodyCapped(request: Request, maxBytes: number): Promise<string> {
+  if (request.body === null) return '';
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const part = await reader.read();
+      if (part.done) break;
+      bytes += part.value.byteLength;
+      if (bytes > maxBytes) {
+        await reader.cancel('request body limit exceeded');
+        throw new RequestBodyTooLarge(maxBytes);
+      }
+      chunks.push(part.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString('utf8');
+}
+
 /**
  * Внутренний REST-контракт ai-bot, а НЕ MCP-протокол: настоящий MCP живёт на /mcp.
  * Оба слоя обязаны спрашивать про видимость одну и ту же listVisibleTools из @hq/exec и
@@ -77,14 +106,17 @@ export function registerRestRoutes(app: Hono<AppEnv>, deps: AppDeps): void {
     const startedAt = deps.ctx.now().getTime();
     const elapsed = (): number => Math.max(0, deps.ctx.now().getTime() - startedAt);
 
-    const raw = await c.req.text();
-    // Заголовка content-length может не быть (chunked) — считаем по факту прочитанного.
-    if (Buffer.byteLength(raw, 'utf8') > MAX_BODY_BYTES) {
+    const maxBytes = deps.ctx.profile === 'bot' ? BOT_MAX_BODY_BYTES : MAX_BODY_BYTES;
+    let raw: string;
+    try {
+      raw = await readRequestBodyCapped(c.req.raw, maxBytes);
+    } catch (error: unknown) {
+      if (!(error instanceof RequestBodyTooLarge)) throw error;
       return c.json(
         {
           error: {
             code: 'payload_too_large',
-            message: `request body exceeds ${String(MAX_BODY_BYTES)} bytes`,
+            message: error.message,
           },
         },
         413,

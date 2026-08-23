@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createApp, MAX_BODY_BYTES } from './app.js';
-import { AUTH_HEADERS, fakeDeps, TEST_TOKEN } from './testing.js';
+import { BOT_MAX_BODY_BYTES, createApp, MAX_BODY_BYTES } from './app.js';
+import { AUTH_HEADERS, fakeCtx, fakeDeps, TEST_TOKEN } from './testing.js';
 
 describe('createApp', () => {
   it('/healthz публичен и не требует токена', async () => {
@@ -28,8 +28,8 @@ describe('createApp', () => {
     expect(body).not.toContain('sql_query');
   });
 
-  it('/metrics без токена — 401 с WWW-Authenticate', async () => {
-    const deps = fakeDeps();
+  it('/metrics human-профиля без токена — 401 с WWW-Authenticate', async () => {
+    const deps = fakeDeps({ ctx: fakeCtx({ profile: 'human' }) });
     const app = createApp(deps);
     const res = await app.request('/metrics');
     expect(res.status).toBe(401);
@@ -44,7 +44,7 @@ describe('createApp', () => {
     // byTool назван именами инструментов, которые бот РЕАЛЬНО может звать. Открытый
     // /metrics отдал бы наружу список, который @hq/exec прячет единообразным отказом:
     // перебор реестра снова стал бы возможен, только через другую дверь.
-    const deps = fakeDeps();
+    const deps = fakeDeps({ ctx: fakeCtx({ profile: 'human' }) });
     deps.metrics.noteCall('client_overview', 'ok', 'test');
     const app = createApp(deps);
     const res = await app.request('/metrics');
@@ -53,15 +53,15 @@ describe('createApp', () => {
   });
 
   it('/metrics с чужим токеном — тоже 401', async () => {
-    const app = createApp(fakeDeps());
+    const app = createApp(fakeDeps({ ctx: fakeCtx({ profile: 'human' }) }));
     const res = await app.request('/metrics', {
       headers: { authorization: `Bearer ${TEST_TOKEN}-nope` },
     });
     expect(res.status).toBe(401);
   });
 
-  it('/metrics со своим токеном отдаёт снапшот', async () => {
-    const deps = fakeDeps();
+  it('keeps guarded metrics available to the human profile', async () => {
+    const deps = fakeDeps({ ctx: fakeCtx({ profile: 'human' }) });
     const app = createApp(deps);
     const res = await app.request('/metrics', { headers: AUTH_HEADERS });
     expect(res.status).toBe(200);
@@ -83,30 +83,64 @@ describe('createApp', () => {
       headers: {
         ...AUTH_HEADERS,
         'content-type': 'application/json',
-        'content-length': String(MAX_BODY_BYTES + 1),
+        'content-length': String(BOT_MAX_BODY_BYTES + 1),
       },
       body: '{}',
     });
     expect(res.status).toBe(413);
     expect(await res.json()).toEqual({
-      error: { code: 'payload_too_large', message: `request body exceeds ${MAX_BODY_BYTES} bytes` },
+      error: {
+        code: 'payload_too_large',
+        message: `request body exceeds ${BOT_MAX_BODY_BYTES} bytes`,
+      },
     });
     // тело даже не разбиралось, инструмент не звался
     expect(deps.metrics.snapshot().totals.calls).toBe(0);
   });
 
-  it('потолок тела действует и на /mcp', async () => {
+  it('does not register native MCP in the bot profile', async () => {
     const app = createApp(fakeDeps());
     const res = await app.request('/mcp', {
       method: 'POST',
       headers: {
         ...AUTH_HEADERS,
         'content-type': 'application/json',
-        'content-length': String(MAX_BODY_BYTES + 1),
       },
-      body: '{}',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
     });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: { code: 'not_found', message: 'unknown route' } });
+  });
+
+  it('does not register metrics in the bot profile', async () => {
+    const res = await createApp(fakeDeps()).request('/metrics', { headers: AUTH_HEADERS });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: { code: 'not_found', message: 'unknown route' } });
+  });
+
+  it('cancels a chunked bot REST body as soon as 16 KiB is crossed', async () => {
+    let pulls = 0;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(new Uint8Array(4096));
+        if (pulls === 100) controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const request = new Request('http://localhost/v1/tools/client_overview', {
+      method: 'POST',
+      headers: { ...AUTH_HEADERS, 'content-type': 'application/json' },
+      body,
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+    const res = await createApp(fakeDeps()).fetch(request);
     expect(res.status).toBe(413);
+    expect(cancelled).toBe(true);
+    expect(pulls).toBeLessThanOrEqual(5);
   });
 
   it('потолок тела стоит ЗА гейтом: без токена сначала 401', async () => {

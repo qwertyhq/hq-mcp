@@ -8,7 +8,15 @@ import { clientResolve } from './resolve.js';
 
 interface ResolveOut {
   query: string;
-  shm: { matches: Array<{ user_id: number; blocked: boolean }>; count: number };
+  shm: {
+    matches: Array<{
+      user_id: number;
+      blocked: boolean;
+      matchedBy: 'shm_user_id' | 'telegram_id' | 'login' | 'email' | null;
+      exact: boolean;
+    }>;
+    count: number;
+  };
   remna: {
     matches: Array<{
       id: number;
@@ -47,6 +55,28 @@ describe('client_resolve', () => {
     expect(search).toBeDefined();
     expect(search?.params).toEqual({ text: '900001', limit: 25 });
     expect(Object.keys(search?.params ?? {})).not.toContain('user_id');
+  });
+
+  it('publishes server-derived exact match evidence without relying on redacted login', async () => {
+    const ctx = makeCtx({ shmList: () => [shmRow], remnaGet: () => [] });
+    const result = (await clientResolve.handler({ query: '900001' }, ctx)) as ResolveOut;
+    expect(result.shm.matches[0]).toMatchObject({
+      user_id: 3073,
+      exact: true,
+      matchedBy: 'telegram_id',
+    });
+  });
+
+  it('marks substring-only SHM rows as non-exact', async () => {
+    const ctx = makeCtx({
+      shmList: (path) =>
+        path === '/admin/user/search'
+          ? [{ ...shmRow, user_id: 88, login: 'ivan-archive', settings: '{}' }]
+          : [],
+      remnaGet: () => [],
+    });
+    const result = (await clientResolve.handler({ query: 'ivan' }, ctx)) as ResolveOut;
+    expect(result.shm.matches[0]).toMatchObject({ exact: false, matchedBy: null });
   });
 
   it('flags several Remnawave users behind one telegram id as ambiguous', async () => {

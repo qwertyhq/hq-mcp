@@ -16,6 +16,7 @@ import { registerRestRoutes } from './rest.js';
  * на любой вход инструмента: самые толстые — это списки uuid, а массовых операций нет (§8).
  */
 export const MAX_BODY_BYTES = 262_144;
+export const BOT_MAX_BODY_BYTES = 16_384;
 
 export interface AppDeps {
   registry: Registry;
@@ -51,21 +52,24 @@ function createGuard(deps: AppDeps): MiddlewareHandler<AppEnv> {
  * Отбой по Content-Length — до чтения потока. Точный контроль по факту прочитанных байт
  * делает rest.ts: заголовка может не быть вовсе (chunked).
  */
-const bodyLimit: MiddlewareHandler<AppEnv> = async (c, next) => {
-  const declared = Number(c.req.header('content-length') ?? '0');
-  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
-    return c.json(
-      {
-        error: {
-          code: 'payload_too_large',
-          message: `request body exceeds ${String(MAX_BODY_BYTES)} bytes`,
+function createBodyLimit(deps: AppDeps): MiddlewareHandler<AppEnv> {
+  const maxBytes = deps.ctx.profile === 'bot' ? BOT_MAX_BODY_BYTES : MAX_BODY_BYTES;
+  return async (c, next) => {
+    const declared = Number(c.req.header('content-length') ?? '0');
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      return c.json(
+        {
+          error: {
+            code: 'payload_too_large',
+            message: `request body exceeds ${String(maxBytes)} bytes`,
+          },
         },
-      },
-      413,
-    );
-  }
-  await next();
-};
+        413,
+      );
+    }
+    await next();
+  };
+}
 
 export function createApp(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
@@ -89,19 +93,22 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   // реально может звать, то есть открытый /metrics отдаёт инвентарь allowlist-а — ровно
   // то, что единообразный отказ `Tool <name> not found` закрывает с другой стороны.
   const guard = createGuard(deps);
-  app.use('/metrics', guard);
+  const bodyLimit = createBodyLimit(deps);
   app.use('/v1/tools', guard);
   app.use('/v1/tools/:name', guard);
-  app.use('/mcp', guard);
   // Потолок тела — ПОСЛЕ гейта: неаутентифицированному клиенту незачем узнавать по коду
   // ответа ни размер потолка, ни то, что за этим путём вообще есть ручка.
   app.use('/v1/tools/:name', bodyLimit);
-  app.use('/mcp', bodyLimit);
-
-  app.get('/metrics', (c) => c.json(deps.metrics.snapshot()));
 
   registerRestRoutes(app, deps);
-  registerMcpRoute(app, deps);
+
+  if (deps.ctx.profile === 'human') {
+    app.use('/metrics', guard);
+    app.get('/metrics', (c) => c.json(deps.metrics.snapshot()));
+    app.use('/mcp', guard);
+    app.use('/mcp', bodyLimit);
+    registerMcpRoute(app, deps);
+  }
 
   app.notFound((c) => c.json({ error: { code: 'not_found', message: 'unknown route' } }, 404));
   app.onError((err, c) => {
