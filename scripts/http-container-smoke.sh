@@ -95,8 +95,8 @@ done
 [ "$(docker inspect --format '{{.Config.User}}' "$CONTAINER_NAME")" = '10001:10001' ]
 [ -z "$(docker port "$CONTAINER_NAME")" ]
 
-docker run -i --rm --network "$NETWORK_NAME" \
-  -e BASE_URL="http://${CONTAINER_NAME}:42480" \
+docker run -i --rm --network "container:${CONTAINER_NAME}" \
+  -e BASE_URL="http://127.0.0.1:42480" \
   -e TOKEN="$TOKEN" \
   -e IMAGE_REVISION="$IMAGE_REVISION" \
   -e DEPLOYMENT_CONFIG_REVISION="$DEPLOYMENT_CONFIG_REVISION" \
