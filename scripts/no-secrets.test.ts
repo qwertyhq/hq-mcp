@@ -41,6 +41,23 @@ const tracked = (): string[] =>
  * Отдельная функция даёт вторую половину проверки («правило ещё ловит», ниже),
  * причём на ТОМ ЖЕ коде, а не на его похожей копии.
  */
+const FIXED_PROTECTED_FILE_ASSIGNMENTS = new Set(
+  [
+    ['SHM_ADMIN_AUTH_FILE', '/run/secrets/shm_admin_auth'],
+    ['REMNA_API_TOKEN_FILE', '/run/secrets/remna_api_token'],
+    ['HQ_MCP_HTTP_TOKENS_FILE', '/run/secrets/http_tokens'],
+  ].map(([name, path]) => `${name}=${path}`),
+);
+
+function isOnlyFixedProtectedFileAssignment(line: string): boolean {
+  const assignment = line
+    .trim()
+    .replace(/^-e\s+/, '')
+    .replace(/\s*\\$/, '')
+    .trim();
+  return FIXED_PROTECTED_FILE_ASSIGNMENTS.has(assignment);
+}
+
 function assignsRealLookingSecret(line: string): boolean {
   // Строки комментариев пропускаются: комментарий ничего не присваивает,
   // а объяснить правило нельзя, не процитировав его — этот тест поймал
@@ -52,6 +69,12 @@ function assignsRealLookingSecret(line: string): boolean {
   if (bare.startsWith('*') || bare.startsWith('//') || bare.startsWith('#')) return false;
   const hit = ASSIGNED_SECRET_RE.exec(line);
   if (hit === null) return false;
+  // Эти три значения — не креды, а фиксированные пути к защищённым bind
+  // mounts production-контейнера. Исключение намеренно требует, чтобы ВСЯ
+  // строка (кроме shell `-e` и завершающего `\`) была одним точным
+  // NAME=/run/secrets/basename: произвольный *_FILE, другой путь или второе
+  // присваивание остаются обычным срабатыванием правила.
+  if (isOnlyFixedProtectedFileAssignment(line)) return false;
   // Хвостовая пунктуация языка — не часть значения: без этого
   // `SECRET_KEY_RE = /…/i;` не опознаётся как литерал регулярки.
   const value = (hit[1] ?? '').replace(/[;,)]+$/, '');
@@ -177,6 +200,28 @@ describe('the rule still catches what it was written for', () => {
     ],
   ])('leaves %s alone', (_name, line) => {
     expect(assignsRealLookingSecret(line)).toBe(false);
+  });
+
+  it.each([
+    ['SHM_ADMIN_AUTH_FILE', '/run/secrets/shm_admin_auth'],
+    ['REMNA_API_TOKEN_FILE', '/run/secrets/remna_api_token'],
+    ['HQ_MCP_HTTP_TOKENS_FILE', '/run/secrets/http_tokens'],
+  ])('allows the fixed protected file reference %s', (name, path) => {
+    expect(assignsRealLookingSecret(assign(name, path))).toBe(false);
+  });
+
+  it('still flags a secret-shaped file variable pointed outside its fixed protected path', () => {
+    expect(assignsRealLookingSecret(assign('REMNA_API_TOKEN_FILE', '/tmp/operator-token-file'))).toBe(
+      true,
+    );
+  });
+
+  it('still flags a second opaque assignment after an allowed protected file reference', () => {
+    const line = [
+      assign('REMNA_API_TOKEN_FILE', '/run/secrets/remna_api_token'),
+      assign('REMNA_API_TOKEN', 'opaque-secret-value'),
+    ].join(' ');
+    expect(assignsRealLookingSecret(line)).toBe(true);
   });
 
   it('the JWT rule deliberately does NOT skip comments', () => {

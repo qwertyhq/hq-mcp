@@ -51,6 +51,8 @@ const env = (over: Record<string, string> = {}): NodeJS.ProcessEnv =>
   ({
     ...UPSTREAMS,
     HQ_MCP_HTTP_TOKENS: 'example:example-token-0123456789abcdef',
+    HQ_MCP_IMAGE_REVISION: '0000000000000000000000000000000000000000',
+    HQ_MCP_DEPLOYMENT_CONFIG_REVISION: '11111111-1111-4111-8111-111111111111',
     ...over,
   }) as NodeJS.ProcessEnv;
 
@@ -126,6 +128,8 @@ describe('bootstrap: собранное приложение', () => {
     expect(body.profile).toBe('human');
     expect(body.version).toBe(readVersion(MODULE_DIR));
     expect(body.version).not.toBe('0.0.0');
+    expect(body.imageRevision).toBeNull();
+    expect(body.deploymentConfigRevision).toBeNull();
     // Реестр настоящий: пустой список означал бы, что рантайм собрался мимо.
     expect(body.tools).toBeGreaterThan(10);
   });
@@ -164,6 +168,8 @@ describe('bootstrap: собранное приложение', () => {
     const { deps } = bootstrap(env({ HQ_MCP_MODE: 'rw', HQ_MCP_PROFILE: 'bot' }), MODULE_DIR);
     expect(deps.ctx.mode).toBe('rw');
     expect(deps.ctx.profile).toBe('bot');
+    expect(deps.imageRevision).toBe('0000000000000000000000000000000000000000');
+    expect(deps.deploymentConfigRevision).toBe('11111111-1111-4111-8111-111111111111');
   });
 });
 

@@ -26,6 +26,8 @@ export interface AppDeps {
   tokens: readonly HttpToken[];
   metrics: Metrics;
   version: string;
+  imageRevision: string | null;
+  deploymentConfigRevision: string | null;
 }
 
 export type AppEnv = { Variables: { clientLabel: string } };
@@ -85,6 +87,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
       profile: deps.ctx.profile,
       mode: deps.ctx.mode,
       tools: listVisibleTools({ registry: deps.registry, ctx: deps.ctx }).length,
+      imageRevision: deps.imageRevision,
+      deploymentConfigRevision: deps.deploymentConfigRevision,
     }),
   );
 

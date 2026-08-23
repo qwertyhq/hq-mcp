@@ -182,6 +182,8 @@ export function bootstrap(env: NodeJS.ProcessEnv, moduleDir: string): Bootstrap 
     // обязаны мерить одним и тем же временем.
     metrics: new Metrics({ now: runtime.ctx.now }),
     version: readVersion(moduleDir),
+    imageRevision: http.imageRevision,
+    deploymentConfigRevision: http.deploymentConfigRevision,
   };
   return { app: createApp(deps), deps, http };
 }

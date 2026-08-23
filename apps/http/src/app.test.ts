@@ -14,6 +14,8 @@ describe('createApp', () => {
       profile: 'bot',
       mode: 'ro',
       tools: 2,
+      imageRevision: '0000000000000000000000000000000000000000',
+      deploymentConfigRevision: '11111111-1111-4111-8111-111111111111',
     });
   });
 
