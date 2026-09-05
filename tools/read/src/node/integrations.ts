@@ -3,7 +3,7 @@ import { scrubSecretShapesDeep } from '@hq/redact';
 import { z } from 'zod';
 import type { Degraded, ToolWarning } from '@hq/types';
 import { asRecord, assertHumanOnly, capLimit, str, warn } from '../kit.js';
-import { partial, readCatalog, readSource, strings } from '../plugins/sources.js';
+import { partial, readCatalog, readSource, referenceExists, strings } from '../plugins/sources.js';
 
 const PATH = '/api/node-integrations';
 
@@ -48,7 +48,7 @@ export const nodeIntegrationsRead = defineTool({
         uuid: str(row.uuid), name: str(row.name), isDisabled: typeof row.isDisabled === 'boolean' ? row.isDisabled : null,
         integrationUuids: ids?.slice(0, 20) ?? null,
         bindings: (ids ?? []).slice(0, 20).map((uuid, position) => ({
-          uuid, position, exists: known.has(uuid) ? true : catalog.complete ? false : null,
+          uuid, position, exists: referenceExists(known.has(uuid), catalog.complete),
         })),
       };
     });

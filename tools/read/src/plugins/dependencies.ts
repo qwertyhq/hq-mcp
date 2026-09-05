@@ -1,6 +1,6 @@
 import type { Degraded, ToolContext, ToolWarning } from '@hq/types';
 import { asRecord, warn } from '../kit.js';
-import { partial, readCatalog, SHARED_LIST_NAME, SHARED_LISTS_PATH } from './sources.js';
+import { partial, readCatalog, referenceExists, SHARED_LIST_NAME, SHARED_LISTS_PATH } from './sources.js';
 import type { Catalog } from './sources.js';
 
 export interface ReferenceScan {
@@ -14,55 +14,73 @@ export interface SharedListReference {
   exists: boolean | null;
 }
 
+interface ScanState {
+  names: Set<string>;
+  visited: number;
+  complete: boolean;
+  seen: WeakSet<object>;
+}
+
+function collectReference(value: string, state: ScanState): void {
+  if (value.includes('<redacted') || value === '<circular>') state.complete = false;
+  if (!value.startsWith('ext:')) return;
+  const name = value.slice(4);
+  if (SHARED_LIST_NAME.test(name) && (state.names.has(name) || state.names.size < 100)) {
+    state.names.add(name);
+  } else {
+    state.complete = false;
+  }
+}
+
+function visitArray(values: unknown[], depth: number, state: ScanState): void {
+  for (const value of values) {
+    if (state.visited >= 10_000) { state.complete = false; break; }
+    visit(value, depth, state);
+  }
+}
+
+function visitRecord(
+  record: Record<string, unknown>, depth: number, state: ScanState, skipEmbeddedCatalog = false,
+): void {
+  for (const key in record) {
+    if (!Object.hasOwn(record, key) || (skipEmbeddedCatalog && key === 'sharedLists')) continue;
+    if (state.visited >= 10_000) { state.complete = false; break; }
+    visit(record[key], depth, state);
+  }
+}
+
+function visit(value: unknown, depth: number, state: ScanState): void {
+  state.visited += 1;
+  if (state.visited > 10_000 || depth > 32) { state.complete = false; return; }
+  if (typeof value === 'string') {
+    collectReference(value, state);
+    return;
+  }
+  if (value === null || typeof value !== 'object') return;
+  if (state.seen.has(value)) { state.complete = false; return; }
+  state.seen.add(value);
+  if (Array.isArray(value)) visitArray(value, depth + 1, state);
+  else visitRecord(asRecord(value), depth + 1, state);
+  state.seen.delete(value);
+}
+
 /** Mirrors injectSharedLists at 3.3.2: discard the root embedded catalog, then scan values. */
 export function scanReferences(config: unknown): ReferenceScan {
-  const names = new Set<string>();
-  let visited = 0;
-  let complete = config !== null && typeof config === 'object' && !Array.isArray(config);
-  const seen = new WeakSet<object>();
-  function visit(value: unknown, depth: number): void {
-    visited += 1;
-    if (visited > 10_000 || depth > 32) { complete = false; return; }
-    if (typeof value === 'string') {
-      if (value.includes('<redacted') || value === '<circular>') complete = false;
-      if (value.startsWith('ext:')) {
-        const name = value.slice(4);
-        if (SHARED_LIST_NAME.test(name) && (names.has(name) || names.size < 100)) names.add(name);
-        else complete = false;
-      }
-      return;
-    }
-    if (value === null || typeof value !== 'object') return;
-    if (seen.has(value)) { complete = false; return; }
-    seen.add(value);
-    if (Array.isArray(value)) {
-      for (const nested of value) {
-        if (visited >= 10_000) { complete = false; break; }
-        visit(nested, depth + 1);
-      }
-    } else {
-      for (const key in value) {
-        if (!Object.hasOwn(value, key)) continue;
-        if (visited >= 10_000) { complete = false; break; }
-        visit(asRecord(value)[key], depth + 1);
-      }
-    }
-    seen.delete(value);
-  }
-  const record = asRecord(config);
-  for (const key in record) {
-    if (!Object.hasOwn(record, key) || key === 'sharedLists') continue;
-    if (visited >= 10_000) { complete = false; break; }
-    visit(record[key], 0);
-  }
-  return { names: [...names], complete };
+  const state: ScanState = {
+    names: new Set<string>(),
+    visited: 0,
+    complete: config !== null && typeof config === 'object' && !Array.isArray(config),
+    seen: new WeakSet<object>(),
+  };
+  visitRecord(asRecord(config), 0, state, true);
+  return { names: [...state.names], complete: state.complete };
 }
 
 export function resolveReferences(scan: ReferenceScan, catalog: Catalog | null): SharedListReference[] {
   const known = new Set(catalog?.rows.map((one) => one.name) ?? []);
   return scan.names.map((name) => ({
     name, reference: `ext:${name}`,
-    exists: known.has(name) ? true : catalog?.complete === true ? false : null,
+    exists: referenceExists(known.has(name), catalog?.complete === true),
   }));
 }
 

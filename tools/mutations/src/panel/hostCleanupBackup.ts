@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { hashInput } from '@hq/confirm';
-import { readBackup, sha256Of, writeBackup } from '../backups.js';
+import { compareStrings, readBackup, sha256Of, writeBackup } from '../backups.js';
 import type { BackupRecord } from '../backups.js';
 
 export const cleanupBackupRefSchema = z.strictObject({
@@ -11,7 +11,7 @@ export const cleanupBackupRefSchema = z.strictObject({
 type CleanupBackupRef = z.infer<typeof cleanupBackupRefSchema>;
 
 function targetOf(uuids: readonly string[]): string {
-  return hashInput({ uuids: [...uuids].sort() });
+  return hashInput({ uuids: [...uuids].sort(compareStrings) });
 }
 
 /** Полный raw JSON, включая mapper и любые неизвестные поля, без вывода значений. */

@@ -1,33 +1,45 @@
 import { defineTool } from '@hq/registry';
 import { z } from 'zod';
-import type { Degraded, ToolWarning } from '@hq/types';
+import type { Degraded, ToolContext, ToolWarning } from '@hq/types';
 import { assertHumanOnly, httpStatus, warn } from '../kit.js';
 import { summarizeGeocheckReport } from './geocheckReport.js';
 
 const GEOCHECK_PATH = '/api/connections/geocheck';
 const jobId = z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/);
-const input = z.object({
+const inputFields = z.object({
   action: z.enum(['start', 'result']).describe('Start one diagnostic job or read its result once'),
   node_uuid: z.uuid().optional().describe('Required for start; forbidden for result'),
   job_id: jobId.optional().describe('Required for result; use the ID returned by start'),
   ip: z.union([z.ipv4(), z.ipv6()]).optional().describe('Optional source IP for start; exclusive with interface'),
   interface: z.string().min(1).max(64).regex(/^[A-Za-z0-9_.:-]+$/).optional()
     .describe('Optional source interface for start; exclusive with ip'),
-}).strict().superRefine((value, ctx) => {
+}).strict();
+type GeocheckInput = z.infer<typeof inputFields>;
+type RejectInput = (path: string, message: string) => void;
+
+function validateStartInput(value: GeocheckInput, reject: RejectInput): void {
+  if (value.node_uuid === undefined) reject('node_uuid', 'start requires node_uuid');
+  if (value.job_id !== undefined) reject('job_id', 'job_id is only allowed for result');
+  if (value.ip !== undefined && value.interface !== undefined) {
+    reject('ip', 'Only one of ip and interface may be specified');
+  }
+}
+
+function validateResultInput(value: GeocheckInput, reject: RejectInput): void {
+  if (value.job_id === undefined) reject('job_id', 'result requires job_id');
+  for (const field of ['node_uuid', 'ip', 'interface'] as const) {
+    if (value[field] !== undefined) reject(field, `${field} is only allowed for start`);
+  }
+}
+
+const input = inputFields.superRefine((value, ctx) => {
   const reject = (path: string, message: string): void => {
     ctx.addIssue({ code: 'custom', path: [path], message });
   };
   if (value.action === 'start') {
-    if (value.node_uuid === undefined) reject('node_uuid', 'start requires node_uuid');
-    if (value.job_id !== undefined) reject('job_id', 'job_id is only allowed for result');
-    if (value.ip !== undefined && value.interface !== undefined) {
-      reject('ip', 'Only one of ip and interface may be specified');
-    }
+    validateStartInput(value, reject);
   } else {
-    if (value.job_id === undefined) reject('job_id', 'result requires job_id');
-    for (const field of ['node_uuid', 'ip', 'interface'] as const) {
-      if (value[field] !== undefined) reject(field, `${field} is only allowed for start`);
-    }
+    validateResultInput(value, reject);
   }
 });
 
@@ -83,6 +95,75 @@ function nodeFailureMessage(value: string | null): string {
   return 'The node did not complete GeoCheck successfully; inspect the panel logs for details.';
 }
 
+async function requestGeocheck(params: GeocheckInput, ctx: ToolContext): Promise<unknown> {
+  if (params.action === 'start') {
+    const body = {
+      ...(params.ip === undefined ? {} : { ip: params.ip }),
+      ...(params.interface === undefined ? {} : { interface: params.interface }),
+    };
+    return ctx.remna.send<unknown>('POST',
+      `${GEOCHECK_PATH}/${encodeURIComponent(params.node_uuid!)}`, body);
+  }
+  return ctx.remna.get<unknown>(`${GEOCHECK_PATH}/${encodeURIComponent(params.job_id!)}`);
+}
+
+function requestErrorDetail(action: GeocheckInput['action'], status: number | null): string {
+  if (status === 401 || status === 403) {
+    const scope = action === 'start' ? 'geocheck' : 'geocheck-result';
+    return `Check the panel credentials and the ${scope} read scope.`;
+  }
+  if (status === 404) {
+    return 'The route or requested node/job is unavailable; check the panel version and ID. Jobs can expire.';
+  }
+  if (status === 429) return 'The panel rate limit refused the request; no retry was made.';
+  return 'The request could not be completed; no job outcome can be inferred.';
+}
+
+function requestErrorWarning(action: GeocheckInput['action'], error: unknown): ToolWarning {
+  const status = httpStatus(error);
+  const statusLabel = status === null || status === 0 ? '' : ` (HTTP ${status})`;
+  const detail = requestErrorDetail(action, status);
+  return warn('geocheck_unavailable', `GeoCheck ${action} unavailable${statusLabel}. ${detail}`);
+}
+
+function startAnswer(response: unknown, answer: GeocheckAnswer): GeocheckAnswer {
+  const parsed = startResponse.safeParse(response);
+  if (!parsed.success) {
+    return unavailable(answer, warn('geocheck_invalid_response',
+      'The panel accepted the request but returned no usable job ID. Check the panel before starting another job.'));
+  }
+  answer.job_id = parsed.data.jobId;
+  return resume(answer, parsed.data.jobId);
+}
+
+function resultAnswer(response: unknown, answer: GeocheckAnswer, id: string): GeocheckAnswer {
+  const parsed = resultResponse.safeParse(response);
+  if (!parsed.success) {
+    return unavailable(answer, warn('geocheck_invalid_response',
+      'The panel returned malformed or inconsistent GeoCheck state. The job outcome is unknown.'));
+  }
+  const state = parsed.data;
+  answer.isCompleted = state.isCompleted;
+  answer.isFailed = state.isFailed;
+  if (state.isFailed) {
+    answer.status = 'failed';
+    answer.warnings.push(warn('geocheck_job_failed', 'The GeoCheck queue job failed without a node result.'));
+    return answer;
+  }
+  if (!state.isCompleted) return resume(answer, id);
+
+  const result = state.result!;
+  answer.node_uuid = result.nodeUuid;
+  answer.success = result.success;
+  answer.status = result.success ? 'completed' : 'failed';
+  if (!result.success) {
+    answer.warnings.push(warn('geocheck_node_failed', nodeFailureMessage(result.message)));
+    return answer;
+  }
+  answer.report = summarizeGeocheckReport(result.rawReport, answer.warnings);
+  return answer;
+}
+
 export const nodeGeocheck = defineTool({
   name: 'node_geocheck',
   description:
@@ -110,64 +191,12 @@ export const nodeGeocheck = defineTool({
 
     let response: unknown;
     try {
-      if (params.action === 'start') {
-        const body = {
-          ...(params.ip === undefined ? {} : { ip: params.ip }),
-          ...(params.interface === undefined ? {} : { interface: params.interface }),
-        };
-        response = await ctx.remna.send<unknown>('POST',
-          `${GEOCHECK_PATH}/${encodeURIComponent(params.node_uuid!)}`, body);
-      } else {
-        response = await ctx.remna.get<unknown>(`${GEOCHECK_PATH}/${encodeURIComponent(params.job_id!)}`);
-      }
+      response = await requestGeocheck(params, ctx);
     } catch (error: unknown) {
-      const status = httpStatus(error);
-      const scope = params.action === 'start' ? 'geocheck' : 'geocheck-result';
-      const detail = status === 401 || status === 403
-        ? `Check the panel credentials and the ${scope} read scope.`
-        : status === 404
-          ? 'The route or requested node/job is unavailable; check the panel version and ID. Jobs can expire.'
-          : status === 429
-            ? 'The panel rate limit refused the request; no retry was made.'
-            : 'The request could not be completed; no job outcome can be inferred.';
-      return unavailable(answer, warn('geocheck_unavailable',
-        `GeoCheck ${params.action} unavailable${status === null || status === 0 ? '' : ` (HTTP ${status})`}. ${detail}`));
+      return unavailable(answer, requestErrorWarning(params.action, error));
     }
 
-    if (params.action === 'start') {
-      const parsed = startResponse.safeParse(response);
-      if (!parsed.success) {
-        return unavailable(answer, warn('geocheck_invalid_response',
-          'The panel accepted the request but returned no usable job ID. Check the panel before starting another job.'));
-      }
-      answer.job_id = parsed.data.jobId;
-      return resume(answer, parsed.data.jobId);
-    }
-
-    const parsed = resultResponse.safeParse(response);
-    if (!parsed.success) {
-      return unavailable(answer, warn('geocheck_invalid_response',
-        'The panel returned malformed or inconsistent GeoCheck state. The job outcome is unknown.'));
-    }
-    const state = parsed.data;
-    answer.isCompleted = state.isCompleted;
-    answer.isFailed = state.isFailed;
-    if (state.isFailed) {
-      answer.status = 'failed';
-      answer.warnings.push(warn('geocheck_job_failed', 'The GeoCheck queue job failed without a node result.'));
-      return answer;
-    }
-    if (!state.isCompleted) return resume(answer, params.job_id!);
-
-    const result = state.result!;
-    answer.node_uuid = result.nodeUuid;
-    answer.success = result.success;
-    answer.status = result.success ? 'completed' : 'failed';
-    if (!result.success) {
-      answer.warnings.push(warn('geocheck_node_failed', nodeFailureMessage(result.message)));
-      return answer;
-    }
-    answer.report = summarizeGeocheckReport(result.rawReport, answer.warnings);
-    return answer;
+    if (params.action === 'start') return startAnswer(response, answer);
+    return resultAnswer(response, answer, params.job_id!);
   },
 });

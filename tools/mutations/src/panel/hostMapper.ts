@@ -15,7 +15,7 @@ function safeJson(value: unknown): boolean {
 }
 
 const mapperPath = z.string().min(1).max(512).refine(
-  (path) => !path.split(/[.\[\]'"\s]+/).some((part) => PROTOTYPE_SEGMENTS.has(part)) &&
+  (path) => !path.split(/[.[\]'"\s]+/).some((part) => PROTOTYPE_SEGMENTS.has(part)) &&
     !path.includes('<redacted'),
   'mapper path содержит запрещённый prototype-сегмент или маскированное значение.',
 );

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ToolContext } from '@hq/types';
+import { compareStrings } from '../backups.js';
 import { configFacts, fingerprint, isRecord, sharedListFacts, sharedListName, syncRefuse } from './syncConfig.js';
 
 export const PLUGINS_PATH = '/api/node-plugins';
@@ -120,7 +121,7 @@ export async function readSyncState(operation: SyncOperation, ctx: ToolContext) 
     : reviewed.filter((one) => one.sharedLists.includes(operation.name));
   const names = new Set(plugins.flatMap((one) => one.sharedLists));
   if (operation.target === 'shared_list') names.add(operation.name);
-  const lists = await readLists(ctx, [...names].sort());
+  const lists = await readLists(ctx, [...names].sort(compareStrings));
   const affectedPlugins = new Set(plugins.map((one) => one.uuid));
   const attached = nodes.filter((one) => one.activePluginUuid !== null && affectedPlugins.has(one.activePluginUuid));
   // Remnawave 3.3.2 NodesRepository.getEnabledNodesByPluginUuid, not merely !isDisabled.

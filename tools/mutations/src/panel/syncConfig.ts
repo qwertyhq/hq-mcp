@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { z } from 'zod';
+import { compareStrings } from '../backups.js';
 
 export const sharedListName = z.string().min(2).max(255).regex(/^[A-Za-z0-9_-]+$/);
 
@@ -17,6 +18,19 @@ export function configFacts(config: unknown): { fingerprint: string; sharedLists
   const references = new Set<string>();
   let visited = 0;
   let textSize = 0;
+  const readText = (value: string): string => {
+    textSize += value.length;
+    if (textSize > 2_000_000) syncRefuse('конфигурация превышает лимит размера.');
+    if (/^(?:<redacted>|<masked>|\[REDACTED\])$/i.test(value)) {
+      syncRefuse('источник конфигурации содержит маски вместо значений; полный хеш неизвестен.');
+    }
+    if (value.startsWith('ext:')) {
+      const name = sharedListName.safeParse(value.slice(4));
+      if (!name.success) syncRefuse('источник содержит некорректную ссылку на общий список.');
+      references.add(name.data);
+    }
+    return value;
+  };
   const canonical = (value: unknown, depth: number): unknown => {
     visited += 1;
     if (visited > 100_000 || depth > 64 || textSize > 2_000_000) {
@@ -24,23 +38,11 @@ export function configFacts(config: unknown): { fingerprint: string; sharedLists
     }
     if (value === null || typeof value === 'boolean') return value;
     if (typeof value === 'number' && Number.isFinite(value)) return value;
-    if (typeof value === 'string') {
-      textSize += value.length;
-      if (textSize > 2_000_000) syncRefuse('конфигурация превышает лимит размера.');
-      if (/^(?:<redacted>|<masked>|\[REDACTED\])$/i.test(value)) {
-        syncRefuse('источник конфигурации содержит маски вместо значений; полный хеш неизвестен.');
-      }
-      if (value.startsWith('ext:')) {
-        const name = sharedListName.safeParse(value.slice(4));
-        if (!name.success) syncRefuse('источник содержит некорректную ссылку на общий список.');
-        references.add(name.data);
-      }
-      return value;
-    }
+    if (typeof value === 'string') return readText(value);
     if (Array.isArray(value)) return value.map((entry) => canonical(entry, depth + 1));
     if (isRecord(value)) {
       const out = Object.create(null) as Record<string, unknown>;
-      for (const key of Object.keys(value).sort()) {
+      for (const key of Object.keys(value).sort(compareStrings)) {
         textSize += key.length;
         out[key] = canonical(value[key], depth + 1);
       }
@@ -51,7 +53,7 @@ export function configFacts(config: unknown): { fingerprint: string; sharedLists
   const encoded = JSON.stringify(canonical(config, 0));
   return {
     fingerprint: createHash('sha256').update(encoded).digest('hex'),
-    sharedLists: [...references].sort(),
+    sharedLists: [...references].sort(compareStrings),
   };
 }
 

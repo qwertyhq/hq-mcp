@@ -33,6 +33,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function validScalar(value: unknown, kind: FieldKind): value is string | number | boolean {
+  switch (kind) {
+    case 'number': return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+    case 'boolean': return typeof value === 'boolean';
+    case 'ip': return typeof value === 'string' && isIP(value) !== 0;
+    case 'country': return typeof value === 'string' && /^[A-Z]{2}$/.test(value);
+    case 'text': return false;
+  }
+}
+
+function reportText(value: string): string | null {
+  // These labels are plain display text, never assignments, URLs, markup or
+  // JSON. Drop those shapes even when a short secret evades the shared scrubber.
+  if (value.length > 4096 || /[<>{}=]|:\/\/|data:/i.test(value)) return null;
+  return scrubSecretShapes(value).text.slice(0, MAX_TEXT).replace(/[\x00-\x1f\x7f]/g, ' ');
+}
+
 export function summarizeGeocheckReport(value: unknown, warnings: ToolWarning[]): Record<string, unknown> | null {
   const source = asRecord(value);
   if (source.schema !== 1) {
@@ -45,19 +62,11 @@ export function summarizeGeocheckReport(value: unknown, warnings: ToolWarning[])
   let malformed = false;
   function scalar(value: unknown, kind: FieldKind): string | number | boolean | null {
     if (value === undefined || value === null) return null;
-    if (kind === 'number' && typeof value === 'number' && Number.isFinite(value) && value >= 0) return value;
-    if (kind === 'boolean' && typeof value === 'boolean') return value;
-    if (typeof value === 'string') {
-      if (kind === 'ip' && isIP(value) !== 0) return value;
-      if (kind === 'country' && /^[A-Z]{2}$/.test(value)) return value;
-      if (kind === 'text') {
-        if (value.length > MAX_TEXT) truncated = true;
-        // These labels are plain display text, never assignments, URLs, markup or
-        // JSON. Drop those shapes even when a short secret evades the shared scrubber.
-        if (value.length > 4096 || /[<>{}=]|:\/\/|data:/i.test(value)) return null;
-        return scrubSecretShapes(value).text.slice(0, MAX_TEXT).replace(/[\x00-\x1f\x7f]/g, ' ');
-      }
+    if (kind === 'text' && typeof value === 'string') {
+      if (value.length > MAX_TEXT) truncated = true;
+      return reportText(value);
     }
+    if (validScalar(value, kind)) return value;
     malformed = true;
     return null;
   }

@@ -18,12 +18,17 @@ export function count(value: unknown): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
+export function referenceExists(found: boolean, catalogComplete: boolean): boolean | null {
+  if (found) return true;
+  return catalogComplete ? false : null;
+}
+
 /** Never copy an upstream error body: it can echo the private configuration that failed. */
 export async function readSource(
   ctx: ToolContext,
   path: string,
   degraded: Degraded[],
-): Promise<unknown | null> {
+): Promise<unknown> {
   try {
     const body = await ctx.remna.get<unknown>(path);
     if (body === null || body === undefined) {
@@ -35,9 +40,9 @@ export async function readSource(
     const status = asRecord(error).status;
     const message = error instanceof Error ? error.message : '';
     const httpStatus = typeof status === 'number' ? status : Number(/\b(401|403|404)\b/.exec(message)?.[1]);
-    const reason = httpStatus === 401 || httpStatus === 403
-      ? 'access denied; check the route scope'
-      : httpStatus === 404 ? 'route or object unavailable' : 'request failed';
+    let reason = 'request failed';
+    if (httpStatus === 401 || httpStatus === 403) reason = 'access denied; check the route scope';
+    else if (httpStatus === 404) reason = 'route or object unavailable';
     degraded.push({ system: 'remna', error: `GET ${path}: ${reason}` });
     return null;
   }

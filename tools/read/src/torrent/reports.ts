@@ -248,9 +248,11 @@ export const torrentReports = defineTool({
       .map((cfg) => asRecord(cfg.torrentBlocker))
       .filter((section) => Object.keys(section).length > 0);
     const enabledFlags = blockerSections.map((section) => section.enabled);
-    const torrentBlockerEnabled = enabledFlags.some((flag) => flag === true) ? true
-      : pluginCoverageComplete && enabledFlags.length > 0 && enabledFlags.every((flag) => flag === false)
-        ? false : null;
+    let torrentBlockerEnabled: boolean | null = null;
+    if (enabledFlags.includes(true)) torrentBlockerEnabled = true;
+    else if (pluginCoverageComplete && enabledFlags.length > 0 && enabledFlags.every((flag) => flag === false)) {
+      torrentBlockerEnabled = false;
+    }
     const ignore = asRecord(blockerSections[0]?.ignoreLists);
     const ignoredUserIds = asArray(ignore.userId)
       .map((one) => num(one, Number.NaN))

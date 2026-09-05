@@ -5,7 +5,7 @@ import type { Degraded, ToolWarning } from '@hq/types';
 import { asRecord, assertHumanOnly, capLimit, str, warn } from '../kit.js';
 import { referenceWarnings, resolveReferences, scanReferences } from './dependencies.js';
 import type { ReferenceScan } from './dependencies.js';
-import { count, MAX_DETAILS, partial, pluginNodeCoverage, readCatalog, readSource, SHARED_LIST_NAME, SHARED_LISTS_PATH } from './sources.js';
+import { count, MAX_DETAILS, partial, pluginNodeCoverage, readCatalog, readSource, referenceExists, SHARED_LIST_NAME, SHARED_LISTS_PATH } from './sources.js';
 
 export const sharedListsRead = defineTool({
   name: 'shared_lists_read',
@@ -64,8 +64,7 @@ export const sharedListsRead = defineTool({
       const pluginIds = new Set(users.map((one) => one.row.uuid));
       return {
         name: listName, reference: `ext:${listName}`,
-        exists: detailValid || catalog.rows.some((listed) => listed.name === listName)
-          ? true : catalog.complete ? false : null,
+        exists: referenceExists(detailValid || catalog.rows.some((listed) => listed.name === listName), catalog.complete),
         type: str(row.type), itemsCount: count(row.itemsCount),
         detailRead: detailValid,
         detail: detailValid ? { type: str(config.type), itemsCount: (config.items as unknown[]).length } : null,
