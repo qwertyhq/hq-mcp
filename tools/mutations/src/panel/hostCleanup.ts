@@ -9,16 +9,20 @@ import {
 } from '@hq/remna';
 import type { Topology } from '@hq/remna';
 import type { ToolContext } from '@hq/types';
+import { defaultBackupDir } from '../backups.js';
 import { defaultSleep, defineMutation, planIdField } from '../kit.js';
 import type { MutationDeps, MutationTool, PlanDraft, PlanGuard } from '../kit.js';
 import { readHostsRaw } from './hostEdit.js';
+import { mapperSummary } from './hostMapper.js';
+import { cleanupBackupRefSchema, cleanupHostsFingerprint, saveCleanupBackup, selectCleanupHosts, verifyCleanupBackup } from './hostCleanupBackup.js';
+import { panelMutationError } from './panelMutationError.js';
 
 /**
  * УДАЛЕНИЕ ХОСТОВ. НЕОБРАТИМО, И ЭТО ГЛАВНОЕ СВОЙСТВО ИНСТРУМЕНТА.
  *
  * У панели нет ни корзины, ни отмены: `hostsRepository.deleteByUUID` удаляет
  * строку. Единственный путь восстановления — создать хост заново руками по
- * снимку, который этот план кладёт на диск ЦЕЛИКОМ и нередактированным.
+ * закрытому backup, который этот план кладёт на диск ЦЕЛИКОМ и нередактированным.
  * Поэтому `rollback` здесь не заполняется вовсе: поле, содержащее «инструкцию
  * отката», которая на деле означает «наберите это в UI», хуже пустого.
  *
@@ -149,8 +153,10 @@ const guard: PlanGuard = {
   // Сверяются СОСТАВ хостов и их выключенность: и «кто-то уже удалил один из
   // них», и «кто-то включил хост, который мы считали погашенным», означают, что
   // прогноз сирот, показанный оператору, больше не про этот мир.
-  keys: ['hostsFingerprint', 'enabledHostsFingerprint'],
-  read: async (_plan, ctx) => {
+  keys: ['hostsFingerprint', 'enabledHostsFingerprint', 'selectedHostsFingerprint'],
+  read: async (plan, ctx) => {
+    const op = opSchema.safeParse(asRecord(plan.after).op);
+    if (!op.success) refuse('снимок плана не несёт разрешённого списка удаления.');
     const hosts = await readHostsRaw(ctx);
     const topology = buildTopology({ nodes: [], hosts, inbounds: [], profiles: [] });
     return {
@@ -158,17 +164,19 @@ const guard: PlanGuard = {
       enabledHostsFingerprint: fingerprint(
         topology.hosts.filter((host) => !host.isDisabled).map((host) => host.uuid),
       ),
+      selectedHostsFingerprint: cleanupHostsFingerprint(selectCleanupHosts(hosts, op.data.uuids)),
     };
   },
 };
 
-export function hostCleanup(deps: MutationDeps): MutationTool {
+export function hostCleanup(deps: MutationDeps, backupDir = defaultBackupDir()): MutationTool {
   return defineMutation<Input>(
     {
       name: 'host_cleanup',
       description:
         'Удаление хостов Remnawave по ЯВНОМУ списку uuid. НЕОБРАТИМО: у панели нет отмены, ' +
-        'восстановление — ручное создание хоста заново по снимку из плана. План показывает ' +
+        'восстановление — ручное создание хоста заново по полному закрытому backup. ' +
+        'План возвращает before.backupRef (путь/SHA-256), а не raw конфигурацию. План показывает ' +
         'поимённо каждый удаляемый хост, их количество и прогноз по карте: какие инбаунды ' +
         'останутся без живого хоста. Если удаление гасит точку входа, которую обслуживает ' +
         'нода, план не строится. Список никогда не выводится из разрывов карты: инбаунд без ' +
@@ -245,6 +253,7 @@ export function hostCleanup(deps: MutationDeps): MutationTool {
             // Прямой ответ на «а точно ли это мусор»: зомби ссылается на
             // инбаунд, которого в панели больше нет.
             isZombie: zombies.has(uuid),
+            mapperSummary: mapperSummary(host.mapper),
           };
         });
 
@@ -253,7 +262,9 @@ export function hostCleanup(deps: MutationDeps): MutationTool {
             `${String(remaining)}. Поимённо они перечислены в after.hosts.`,
           'НЕОБРАТИМО. У панели нет отмены удаления хоста. Единственный путь назад — создать ' +
             'хост заново руками; полный нередактированный снимок каждого удаляемого хоста ' +
-            'сохранён в файле плана, поле rollback намеренно пустое.',
+            'сохранён в закрытом backup (0700/0600), ссылка — before.backupRef. ' +
+            'Перед первым DELETE проверяются backup и полный raw fingerprint выбранных хостов; ' +
+            'поле rollback намеренно пустое.',
           'Удаление немедленно меняет выдачу подписок всем клиентам, которым этот хост попадал ' +
             'в конфиг.',
           `Удаляем поштучно с паузой ${String(DELETE_PAUSE_MS)} мс: каждое удаление порождает ` +
@@ -286,6 +297,8 @@ export function hostCleanup(deps: MutationDeps): MutationTool {
           );
         }
 
+        const selectedHosts = selectCleanupHosts(hosts, asked);
+        const backupRef = await saveCleanupBackup(backupDir, selectedHosts, ctx.now());
         const before = {
           totalHosts: hosts.length,
           // Ключи сверки живут В СНИМКЕ, а не только в `guard.read`:
@@ -295,8 +308,10 @@ export function hostCleanup(deps: MutationDeps): MutationTool {
           enabledHostsFingerprint: fingerprint(
             topology.hosts.filter((host) => !host.isDisabled).map((host) => host.uuid),
           ),
-          // Полный СЫРОЙ снимок: восстанавливать нечем, кроме него.
-          hosts: asked.map((uuid) => byUuid.get(uuid)),
+          selectedHostsFingerprint: cleanupHostsFingerprint(selectedHosts),
+          backupRef,
+          // Полный raw JSON живёт только в backup: mapper.value не маскируется по имени.
+          hosts: doomed,
         };
 
         return {
@@ -321,6 +336,10 @@ export function hostCleanup(deps: MutationDeps): MutationTool {
         if (!parsed.success) {
           refuse('снимок плана не несёт разрешённого списка удаления — постройте план заново.');
         }
+        const before = asRecord(plan.before);
+        const ref = cleanupBackupRefSchema.safeParse(before.backupRef);
+        if (!ref.success) refuse('в плане нет корректной ссылки на закрытый backup; удаление запрещено.');
+        await verifyCleanupBackup(backupDir, ref.data, parsed.data.uuids, before.selectedHostsFingerprint);
         const sleep = deps.sleep ?? defaultSleep;
         const deleted: string[] = [];
 
@@ -331,11 +350,11 @@ export function hostCleanup(deps: MutationDeps): MutationTool {
           try {
             await ctx.remna.send<unknown>('DELETE', `${HOSTS_PATH}/${uuid}`);
           } catch (error: unknown) {
-            const message = error instanceof Error ? error.message : String(error);
+            const message = panelMutationError('DELETE /api/hosts/{uuid}', error).message;
             throw new Error(
               `host_cleanup: удаление ${uuid} не прошло (${message}). УЖЕ УДАЛЕНЫ и не ` +
                 `подлежат восстановлению: ${deleted.join(', ') || '(ни одного)'}. Снимок ` +
-                'удалённых хостов остался в файле плана.',
+                `удалённых хостов сохранён в закрытом backup ${ref.data.path}.`,
             );
           }
           deleted.push(uuid);
@@ -351,6 +370,7 @@ export function hostCleanup(deps: MutationDeps): MutationTool {
           stillPresent,
           remaining: left.length,
           verified: stillPresent.length === 0,
+          backupRef: ref.data,
         };
       },
     },

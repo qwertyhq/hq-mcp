@@ -24,6 +24,8 @@ describe('@hq/types guards', () => {
       'shm.dry_run',
       'remna.subscriptionRequestHistory',
       'remna.realtimeBandwidth',
+      'remna.nodeIntegrations',
+      'remna.sharedLists',
       'tunnel.mysql',
       'tunnel.postgres',
       'tunnel.abuse',

@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { buildDiff } from '@hq/confirm';
+import type { MutationPlan } from '@hq/confirm';
 import type { ToolContext } from '@hq/types';
 import { defineMutation, planIdField } from '../kit.js';
+import { assertNodeIntegrations, integrationBindings, nodeIntegrationUuidsSchema } from './nodeIntegrations.js';
 import type { MutationDeps, MutationTool, PlanDraft, PlanGuard } from '../kit.js';
 
 /**
@@ -94,6 +96,10 @@ const input = z.object({
     .optional()
     .describe('Множитель списания трафика клиентам на этой ноде. Меняет счёт КАЖДОМУ на ней.'),
   node_consumption_multiplier: z.number().min(0).max(100).optional(),
+  integration_uuids: nodeIntegrationUuidsSchema.optional().describe(
+    'Remnawave 3.3, только create/update: до 20 UUID интеграций в порядке применения. ' +
+      '[] снимает все связи, пропуск сохраняет их. Явное поле принудительно перезапускает включённую ноду.',
+  ),
   config_profile_uuid: z.string().uuid().optional().describe('Только для create: профиль конфигурации ноды.'),
   active_inbound_uuids: z
     .array(z.string().uuid())
@@ -123,6 +129,7 @@ const patchSchema = z.strictObject({
   trafficResetDay: z.number().int().min(1).max(31).optional(),
   consumptionMultiplier: z.number().min(0).max(100).optional(),
   nodeConsumptionMultiplier: z.number().min(0).max(100).optional(),
+  integrationUuids: nodeIntegrationUuidsSchema.optional(),
 });
 
 /** Тело POST /api/nodes — тоже закрытый список. Ключевого материала здесь нет. */
@@ -133,6 +140,7 @@ const createSchema = z.strictObject({
   countryCode: z.string().length(2),
   note: z.string().max(255).optional(),
   tags: tagsSchema.optional(),
+  integrationUuids: nodeIntegrationUuidsSchema.optional(),
   configProfile: z.object({
     activeConfigProfileUuid: z.string().uuid(),
     activeInbounds: z.array(z.string().uuid()).min(1),
@@ -170,6 +178,7 @@ interface NodeState extends Record<string, unknown> {
   tags: string[];
   profileUuid: string | null;
   activeInboundCount: number;
+  integrationUuids: string[] | null;
 }
 
 /**
@@ -195,6 +204,7 @@ const GUARD_KEYS = [
   'tags',
   'profileUuid',
   'activeInboundCount',
+  'integrationUuids',
 ];
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -250,6 +260,7 @@ function nodeState(node: Record<string, unknown>): NodeState {
       .filter((one): one is string => one !== null),
     profileUuid: strOrNull(profile.activeConfigProfileUuid ?? node.activeConfigProfileUuid),
     activeInboundCount: asArray(profile.activeInbounds).length,
+    integrationUuids: integrationBindings(node.integrationUuids),
   };
 }
 
@@ -272,17 +283,40 @@ async function readNode(ctx: ToolContext, uuid: string): Promise<Record<string, 
   return node;
 }
 
+function operationOf(plan: MutationPlan): Op {
+  const before = asRecord(plan.before);
+  const after = asRecord(plan.after);
+  const parsed = opSchema.safeParse(after.op);
+  if (!parsed.success) refuse('снимок плана не несёт разрешённой операции — постройте план заново.');
+  const op = parsed.data;
+  if (op.action === 'update') {
+    const patch = op.patch;
+    if (patch === undefined || patch.uuid !== op.uuid || op.uuid !== before.uuid || op.uuid !== after.uuid) {
+      refuse('uuid тела PATCH не совпадает с нодой в снимке плана.');
+    }
+    if (JSON.stringify(after.integrationUuids) !== JSON.stringify(patch.integrationUuids ?? before.integrationUuids)) {
+      refuse('порядок integrationUuids тела PATCH не совпадает с рассмотренным планом.');
+    }
+    if (patch.integrationUuids !== undefined) {
+      const rollback = patchSchema.safeParse(plan.rollback?.body);
+      if (plan.rollback?.method !== 'PATCH' || plan.rollback.path !== NODES_PATH ||
+          !rollback.success || rollback.data.uuid !== op.uuid ||
+          JSON.stringify(rollback.data.integrationUuids) !== JSON.stringify(before.integrationUuids)) {
+        refuse('откат integrationUuids не совпадает с исходным снимком плана.');
+      }
+    }
+  }
+  return op;
+}
+
 const guard: PlanGuard = {
   keys: GUARD_KEYS,
   read: async (plan, ctx) => {
-    const parsed = opSchema.safeParse(asRecord(plan.after).op);
-    if (!parsed.success) {
-      refuse('снимок плана не несёт разрешённой операции — постройте план заново.');
-    }
-    const op = parsed.data;
+    const op = operationOf(plan);
     if (op.action === 'create') {
       const create = op.create;
       if (create === undefined) refuse('в плане create нет тела — постройте план заново.');
+      await assertNodeIntegrations(ctx, create.integrationUuids);
       const nodes = await readNodes(ctx);
       const twin = nodes.find(
         (one) => one.name === create.name || one.address === create.address,
@@ -290,6 +324,7 @@ const guard: PlanGuard = {
       return { exists: twin !== undefined, name: create.name, address: create.address };
     }
     if (op.uuid === undefined) refuse('в плане нет uuid ноды — постройте план заново.');
+    if (op.action === 'update') await assertNodeIntegrations(ctx, op.patch?.integrationUuids);
     return nodeState(await readNode(ctx, op.uuid));
   },
 };
@@ -304,6 +339,7 @@ interface Prepared {
   after: NodeState | Record<string, unknown>;
   op: Op;
   effects: string[];
+  rollback?: PlanDraft['rollback'];
 }
 
 function usersNote(state: NodeState): string {
@@ -331,6 +367,7 @@ function patchOf(i: Input): Record<string, unknown> {
   if (i.node_consumption_multiplier !== undefined) {
     patch.nodeConsumptionMultiplier = i.node_consumption_multiplier;
   }
+  if (i.integration_uuids !== undefined) patch.integrationUuids = i.integration_uuids;
   return patch;
 }
 
@@ -451,7 +488,7 @@ function prepareAction(i: Input, uuid: string, state: NodeState, fleet: NodeStat
         refuse(
           'update требует хотя бы одно поле: name, address, port, country_code, note, tags, ' +
             'is_traffic_tracking_active, traffic_limit_bytes, notify_percent, traffic_reset_day, ' +
-            'consumption_multiplier, node_consumption_multiplier.',
+            'consumption_multiplier, node_consumption_multiplier, integration_uuids.',
         );
       }
       const body: Record<string, unknown> = { uuid };
@@ -472,6 +509,9 @@ function prepareAction(i: Input, uuid: string, state: NodeState, fleet: NodeStat
       }
 
       const effects: string[] = [];
+      if (patch.integrationUuids !== undefined && (state.integrationUuids === null || state.isDisabled === null)) {
+        refuse('исходный integrationUuids/isDisabled неизвестен; точный откат и эффект перезапуска определить нельзя.');
+      }
       /**
        * `updateNode` заканчивается на `if (!node.isDisabled) startNode(...)` —
        * правка ВКЛЮЧЁННОЙ ноды перезапускает на ней xray. Переименование ноды
@@ -483,6 +523,12 @@ function prepareAction(i: Input, uuid: string, state: NodeState, fleet: NodeStat
           `Нода включена, поэтому панель после правки ПЕРЕЗАПУСТИТ на ней xray — любое ` +
             `изменение здесь равносильно рестарту. ${usersNote(state)}`,
         );
+        if (patch.integrationUuids !== undefined) {
+          effects.push(
+            'Явное integrationUuids, включая [], заставляет панель выполнить ПРИНУДИТЕЛЬНЫЙ ' +
+              'перезапуск (force=true), даже если порядок UUID не меняется. Дополнительного restart API вызова нет.',
+          );
+        }
       }
       if (patch.consumptionMultiplier !== undefined) {
         effects.push(
@@ -496,7 +542,17 @@ function prepareAction(i: Input, uuid: string, state: NodeState, fleet: NodeStat
             'старый адрес, этим не правятся — их правит host_edit.',
         );
       }
-      return { op: { ...op, patch: parsed.data }, after: { ...state, ...patch }, effects };
+      const previous: Record<string, unknown> = { uuid };
+      if (state.isTrafficTrackingActive !== null) previous.isTrafficTrackingActive = state.isTrafficTrackingActive;
+      for (const key of Object.keys(patch)) previous[key] = state[key];
+      const rollback = patchSchema.safeParse(previous);
+      if (!rollback.success && patch.integrationUuids !== undefined) {
+        refuse('прежние значения полей не образуют точное тело отката; измените integrations отдельным планом.');
+      }
+      return {
+        op: { ...op, patch: parsed.data }, after: { ...state, ...patch }, effects,
+        ...(rollback.success ? { rollback: { method: 'PATCH', path: NODES_PATH, body: rollback.data } } : {}),
+      };
     }
 
     case 'create': {
@@ -565,6 +621,7 @@ async function prepareCreate(i: Input, ctx: ToolContext): Promise<Prepared> {
   if (i.port !== undefined) body.port = i.port;
   if (i.tags !== undefined) body.tags = i.tags;
   if (i.note !== undefined && i.note !== null) body.note = i.note;
+  if (i.integration_uuids !== undefined) body.integrationUuids = i.integration_uuids;
 
   const parsed = createSchema.safeParse(body);
   if (!parsed.success) {
@@ -584,6 +641,7 @@ async function prepareCreate(i: Input, ctx: ToolContext): Promise<Prepared> {
       countryCode: parsed.data.countryCode,
       profileUuid: parsed.data.configProfile.activeConfigProfileUuid,
       activeInboundCount: parsed.data.configProfile.activeInbounds.length,
+      ...(parsed.data.integrationUuids === undefined ? {} : { integrationUuids: parsed.data.integrationUuids }),
     },
     effects: [
       'Нода создаётся ВКЛЮЧЁННОЙ (isDisabled: false в createNode) и сразу попадает в парк.',
@@ -616,6 +674,7 @@ export function nodeManage(deps: MutationDeps): MutationTool {
       endpoints: [
         'GET /api/nodes',
         'GET /api/config-profiles',
+        'GET /api/node-integrations',
         'POST /api/nodes',
         'PATCH /api/nodes',
         'POST /api/nodes/{uuid}/actions/enable',
@@ -630,6 +689,10 @@ export function nodeManage(deps: MutationDeps): MutationTool {
       target: (i) => (i.uuid === undefined ? undefined : { system: 'remna', id: i.uuid }),
 
       plan: async (i, ctx): Promise<PlanDraft> => {
+        if (i.integration_uuids !== undefined && i.action !== 'create' && i.action !== 'update') {
+          refuse('integration_uuids допустим только для create/update.');
+        }
+        await assertNodeIntegrations(ctx, i.integration_uuids);
         if (i.action === 'create') {
           const { after, op, effects } = await prepareCreate(i, ctx);
           const before = { exists: false, name: i.name ?? null, address: i.address ?? null };
@@ -654,22 +717,19 @@ export function nodeManage(deps: MutationDeps): MutationTool {
         }
         const before = nodeState(node);
         const fleet = nodes.map(nodeState);
-        const { after, op, effects } = prepareAction(i, i.uuid, before, fleet);
+        const { after, op, effects, rollback } = prepareAction(i, i.uuid, before, fleet);
 
         return {
           before,
           after: { ...after, op },
           diff: buildDiff(before, after, ctx.profile),
           sideEffects: [...effects, ...COMMON_EFFECTS],
+          rollback,
         };
       },
 
       apply: async (plan, ctx) => {
-        const parsed = opSchema.safeParse(asRecord(plan.after).op);
-        if (!parsed.success) {
-          refuse('снимок плана не несёт разрешённой операции — постройте план заново.');
-        }
-        const op = parsed.data;
+        const op = operationOf(plan);
 
         switch (op.action) {
           case 'enable':

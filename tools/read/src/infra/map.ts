@@ -31,6 +31,20 @@ function listing(value: unknown, ok: boolean, key: string): Listing {
   return { rows, ok, reported: known, short: known !== null && known > rows.length };
 }
 
+function mapperSummary(value: unknown): {
+  configured: boolean; operations: Record<string, number>;
+} | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const mapper = asRecord(value);
+  const operations: Record<string, number> = {};
+  for (const format of ['xrayJson', 'mihomo', 'base64', 'singbox']) {
+    const rows = mapper[format];
+    if (rows !== undefined && !Array.isArray(rows)) return null;
+    operations[format] = Array.isArray(rows) ? rows.length : 0;
+  }
+  return { configured: Object.values(operations).some((count) => count > 0), operations };
+}
+
 export const infraMap = defineTool({
   name: 'infra_map',
   description:
@@ -42,7 +56,8 @@ export const infraMap = defineTool({
     'internal hop. Every gap is computed only from listings that answered in full: when a source ' +
     'is missing the gap comes back null with a reason in `suppressed`, never as a list. Raw xray ' +
     'configs are deliberately not returned — profiles and inbounds carry them inline, Reality ' +
-    'private keys included.',
+    'private keys included. Hosts include mapper operation counts by client format; nodes ' +
+    'include ordered integration bindings when the panel exposes them (Remnawave 3.3+).',
   input: z.object({}),
   access: 'ro',
   risk: 'none',
@@ -99,9 +114,20 @@ export const infraMap = defineTool({
       inbounds: inboundList.rows,
       profiles: profileList.rows,
     });
-    const mappedNodes = topology.nodes;
+    const rawNodes = new Map(nodeList.rows.map((row) => [str(row.uuid), row]));
+    const rawHosts = new Map(hostList.rows.map((row) => [str(row.uuid), row]));
+    const mappedNodes = topology.nodes.map((node) => {
+      const bindings = rawNodes.get(node.uuid)?.integrationUuids;
+      return {
+        ...node,
+        integrationUuids: Array.isArray(bindings) && bindings.every((item) => typeof item === 'string')
+          ? bindings as string[] : null,
+      };
+    });
     const mappedProfiles = topology.profiles;
-    const mappedHosts = topology.hosts;
+    const mappedHosts = topology.hosts.map((host) => ({
+      ...host, mapper: mapperSummary(rawHosts.get(host.uuid)?.mapper),
+    }));
 
     /**
      * Если ни один листинг инбаундов не приехал целиком, дыра не считается

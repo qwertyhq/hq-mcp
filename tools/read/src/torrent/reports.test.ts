@@ -16,11 +16,17 @@ interface Out {
   plugin: {
     installed: number | null;
     configsRead: number;
+    configsComplete: boolean;
     torrentBlockerEnabled: boolean | null;
     blockDurationSeconds: number | null;
     ignoredUserIds: number[];
     ignoredIpCount: number | null;
     nodesWithoutPlugin: string[] | null;
+    rulePlacement: number | null;
+    includeRuleTags: string[] | null;
+    includeRuleTagCount: number | null;
+    configurations: Array<{ uuid: string | null; rulePlacement: number | null; includeRuleTags: string[] | null }>;
+    sharedListReferences: Array<{ name: string; reference: string; exists: boolean | null }> | null;
   };
   stats: {
     totalReports: number | null;
@@ -121,6 +127,8 @@ interface Overrides {
   stats?: unknown;
   reports?: unknown;
   nodes?: unknown;
+  sharedLists?: unknown;
+  profile?: 'human' | 'bot';
 }
 
 function run(
@@ -130,6 +138,7 @@ function run(
 ): Promise<Out> {
   const ctx = makeCtx({
     calls,
+    ...(over.profile === undefined ? {} : { profile: over.profile }),
     remnaGet: (path) => {
       if (path === '/api/node-plugins') {
         if (over.plugins !== undefined) {
@@ -146,6 +155,10 @@ function run(
       if (path === '/api/node-plugins/torrent-blocker') {
         if (over.reports === 'throw') throw new Error('reports down');
         return over.reports ?? { total: 2, records: [report(2, 51, 'Estonia'), report(1, 6, 'Finland')] };
+      }
+      if (path === '/api/node-plugins/shared-lists') {
+        if (over.sharedLists === 'throw') throw new Error('403');
+        return over.sharedLists ?? { total: 0, sharedLists: [] };
       }
       if (path.startsWith('/api/node-plugins/')) {
         if (over.card === 'throw') throw new Error('card down');
@@ -214,6 +227,15 @@ describe('torrent_reports', () => {
     expect(codes(out)).not.toContain('torrent_blocker_disabled');
   });
 
+  it('does not count a malformed plugin config as a successful configuration read', async () => {
+    const out = await run({}, { card: { ...PLUGIN_CARD, pluginConfig: null } });
+    expect(out.plugin.configsRead).toBe(0);
+    expect(out.plugin.configsComplete).toBe(false);
+    expect(out.plugin.includeRuleTags).toBeNull();
+    expect(out.plugin.rulePlacement).toBeNull();
+    expect(codes(out)).toContain('partial_result');
+  });
+
   it('names the enabled nodes that carry no plugin at all, and skips disabled ones', async () => {
     const out = await run({});
     expect(out.plugin.nodesWithoutPlugin).toEqual(['Germany']);
@@ -228,6 +250,13 @@ describe('torrent_reports', () => {
     expect(codes(out)).not.toContain('nodes_without_torrent_blocker');
     expect(codes(out)).toContain('partial_result');
     expect(out.degraded[0]?.system).toBe('remna');
+  });
+
+  it('does not label a node uncovered when its plugin binding was omitted', async () => {
+    const out = await run({}, { nodes: [{ uuid: 'node-Example', name: 'Example', isDisabled: false }] });
+    expect(out.plugin.nodesWithoutPlugin).toBeNull();
+    expect(codes(out)).not.toContain('nodes_without_torrent_blocker');
+    expect(codes(out)).toContain('partial_result');
   });
 
   /**
@@ -328,5 +357,66 @@ describe('torrent_reports', () => {
     expect(out.stats).toBeNull();
     expect(out.reportsForUser).toBeNull();
     expect(codes(out)).toContain('partial_result');
+  });
+
+  it.each([
+    { placement: undefined, want: null },
+    { placement: 0, want: 0 },
+    { placement: 12.5, want: 12.5 },
+  ])('preserves rulePlacement $placement without synthesizing a default', async ({ placement, want }) => {
+    const out = await run({}, { card: { ...PLUGIN_CARD, pluginConfig: { torrentBlocker: {
+      ...PLUGIN_CARD.pluginConfig.torrentBlocker,
+      ...(placement === undefined ? {} : { rulePlacement: placement }),
+      includeRuleTags: ['route-one', 'route-two'],
+    } } } });
+    expect(out.plugin.rulePlacement).toBe(want);
+    expect(out.plugin.includeRuleTags).toEqual(['route-one', 'route-two']);
+    expect(out.plugin.includeRuleTagCount).toBe(2);
+    expect(out.plugin.configurations[0]).toMatchObject({ uuid: PLUGIN_UUID, rulePlacement: want });
+  });
+
+  it.each([
+    { sharedLists: { total: 0, sharedLists: [] }, exists: false },
+    { sharedLists: 'throw', exists: null },
+    { sharedLists: { total: 1, sharedLists: [] }, exists: null },
+  ])('diagnoses ext references without counting them as literal ignored IPs', async ({ sharedLists, exists }) => {
+    const out = await run({}, { sharedLists, card: { ...PLUGIN_CARD, pluginConfig: { torrentBlocker: {
+      ...PLUGIN_CARD.pluginConfig.torrentBlocker,
+      ignoreLists: { ip: ['198.51.100.7', 'ext:trusted'] },
+    } } } });
+    expect(out.plugin.sharedListReferences).toEqual([{ name: 'trusted', reference: 'ext:trusted', exists }]);
+    expect(out.plugin.ignoredIpCount).toBe(1);
+    expect(codes(out).includes('shared_list_reference_missing')).toBe(exists === false);
+    expect(JSON.stringify(out)).not.toContain('198.51.100.7');
+  });
+
+  it('does not report the whole fleet disabled when unread plugin cards may be enabled', async () => {
+    const ctx = makeCtx({ remnaGet: (path) => {
+      if (path === '/api/node-plugins') return { total: 2, nodePlugins: [{ uuid: 'off' }, { uuid: 'unread' }] };
+      if (path === '/api/node-plugins/off') return { uuid: 'off', pluginConfig: { torrentBlocker: { enabled: false } } };
+      if (path === '/api/node-plugins/unread') throw new Error('403');
+      if (path === '/api/node-plugins/torrent-blocker/stats') return STATS;
+      if (path === '/api/node-plugins/torrent-blocker') return { total: 0, records: [] };
+      if (path === '/api/nodes') return [];
+      throw new Error(`unexpected path ${path}`);
+    } });
+    const out = await torrentReports.handler(torrentReports.input.parse({}), ctx) as Out;
+    expect(out.plugin.torrentBlockerEnabled).toBeNull();
+    expect(codes(out)).not.toContain('torrent_blocker_disabled');
+  });
+
+  it('keeps new bot diagnostics structural and does not read the human-only shared-list catalog', async () => {
+    const calls: StubCall[] = [];
+    const out = await run({}, { profile: 'bot', card: { ...PLUGIN_CARD, pluginConfig: { torrentBlocker: {
+      ...PLUGIN_CARD.pluginConfig.torrentBlocker, rulePlacement: 5, includeRuleTags: ['private-rule'],
+      ignoreLists: { ip: ['ext:private-list'] },
+    } } } }, calls);
+    expect(out.plugin.rulePlacement).toBe(5);
+    expect(out.plugin.includeRuleTags).toBeNull();
+    expect(out.plugin.includeRuleTagCount).toBe(1);
+    expect(out.plugin.sharedListReferences).toBeNull();
+    expect(JSON.stringify(out)).not.toContain('private-rule');
+    expect(JSON.stringify(out)).not.toContain('private-list');
+    expect(calls.some((one) => one.path === '/api/node-plugins/shared-lists')).toBe(false);
   });
 });

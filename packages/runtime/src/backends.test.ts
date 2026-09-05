@@ -60,7 +60,10 @@ const REMNA_READ = [
   'infra_costs',
   'infra_map',
   'node_config_audit',
+  'node_geocheck',
+  'node_integrations_read',
   'panel_activity',
+  'shared_lists_read',
   'squads_read',
   'subpage_read',
   'subscription_inspect',
@@ -90,7 +93,7 @@ const SHM_WRITE = [
   'user_flags',
 ];
 
-const REMNA_WRITE = ['bulk_ops', 'host_cleanup', 'host_edit', 'node_manage', 'subscription_ops'];
+const REMNA_WRITE = ['bulk_ops', 'host_cleanup', 'host_edit', 'node_manage', 'panel_sync', 'subscription_ops'];
 
 /** Служебные: ни одного бэкенда сами не трогают. */
 const OPS_WRITE = ['ops_audit', 'ops_confirm'];

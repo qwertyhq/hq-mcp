@@ -19,8 +19,11 @@ import { createSqlQueryTool, probeTcp } from './sql/query.js';
 import { infraCosts } from './infra/costs.js';
 import { infraMap } from './infra/map.js';
 import { nodeConfigAudit } from './node/config.js';
+import { nodeGeocheck } from './node/geocheck.js';
+import { nodeIntegrationsRead } from './node/integrations.js';
 import { notifyHistory } from './notify/history.js';
 import { panelActivity } from './panel/activity.js';
+import { sharedListsRead } from './plugins/sharedLists.js';
 import { promoRead } from './promo/read.js';
 import { provisioningDiagnose } from './provisioning/diagnose.js';
 import { serverInventory } from './server/inventory.js';
@@ -111,6 +114,9 @@ export function createReadTools(opts: CreateReadToolsOptions): ToolDef[] {
     infraMap,
     squadsRead,
     nodeConfigAudit,
+    nodeIntegrationsRead,
+    sharedListsRead,
+    nodeGeocheck,
     serverInventory,
     infraCosts,
     deviceInventory,
@@ -127,6 +133,9 @@ export function createReadTools(opts: CreateReadToolsOptions): ToolDef[] {
 }
 
 export { createPlatformProbeTool, resetProbeCache, UNKNOWN_CAPABILITIES } from './platform/probe.js';
+export { nodeGeocheck } from './node/geocheck.js';
+export { nodeIntegrationsRead } from './node/integrations.js';
+export { sharedListsRead } from './plugins/sharedLists.js';
 // resetAbuseBudget едет рядом с resetProbeCache не для симметрии: бюджет
 // abuse_report — такое же модульное состояние, что и кэш пробы, и живёт он на
 // настоящих часах. Рантайм, собранный в процессе второй раз, унаследовал бы

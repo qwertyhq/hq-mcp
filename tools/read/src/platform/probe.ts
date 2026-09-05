@@ -1,6 +1,7 @@
 import { defineTool } from '@hq/registry';
 import { z } from 'zod';
 import type { ProbeResult, RemnaRuntimeHealth, TcpProbe, ToolDef, TunnelConfig } from '@hq/types';
+import { catalogCapability } from './capabilities.js';
 import {
   MIN_REMNA_VERSION,
   MIN_SHM_VERSION,
@@ -36,6 +37,8 @@ export const UNKNOWN_CAPABILITIES: ProbeResult['capabilities'] = {
   'shm.dry_run': 'unknown',
   'remna.subscriptionRequestHistory': 'unknown',
   'remna.realtimeBandwidth': 'unknown',
+  'remna.nodeIntegrations': 'unknown',
+  'remna.sharedLists': 'unknown',
   'tunnel.mysql': 'unknown',
   'tunnel.postgres': 'unknown',
   'tunnel.abuse': 'unknown',
@@ -48,14 +51,15 @@ export function resetProbeCache(): void {
 }
 
 /** Итог одной пробы возможности: значение при успехе, вердикт при отказе. */
-type CapabilityProbe<T> = { ok: true; value: T } | { ok: false; verdict: false | 'unknown' };
+type CapabilityProbe<T> = { ok: true; value: T } |
+  { ok: false; verdict: false | 'unknown'; status?: number };
 
 /**
  * Классифицирует отказ, а не факт отказа: `settle()` стирает исходную ошибку в
  * строку и для reachability этого достаточно, но для возможности важно, что
  * именно доказал бэкенд.
  *
- * - `false` — бэкенд ОТВЕТИЛ и отверг именно этот параметр/маршрут (4xx). Это и
+ * - `false` — бэкенд отверг параметр (400) или маршрут (404). Это и
  *   есть ответ на вопрос «поддерживается ли возможность».
  * - `'unknown'` — доказано НИЧЕГО: сетевой сбой или таймаут без статуса вовсе,
  *   оборванный запрос, либо 5xx. 5xx означает «сервер сломан прямо сейчас», а
@@ -75,7 +79,7 @@ function statusOf(error: unknown): number | undefined {
 
 function classifyRejection(error: unknown): false | 'unknown' {
   const status = statusOf(error);
-  return status !== undefined && status >= 400 && status < 500 ? false : 'unknown';
+  return status === 400 || status === 404 ? false : 'unknown';
 }
 
 /** Как `settle`, но сохраняет статус: `settle` стирает ошибку в строку. */
@@ -147,7 +151,8 @@ async function probeCapability<T>(promise: Promise<T>): Promise<CapabilityProbe<
   try {
     return { ok: true, value: await promise };
   } catch (error: unknown) {
-    return { ok: false, verdict: classifyRejection(error) };
+    const status = statusOf(error);
+    return { ok: false, verdict: classifyRejection(error), ...(status === undefined ? {} : { status }) };
   }
 }
 
@@ -172,13 +177,15 @@ export function createPlatformProbeTool(
       'reachability, versions, SHM spool ' +
       'statuses, panel process health, and which undocumented features actually work on ' +
       'production right now (server-side filter, the realtime bandwidth route, whether the panel ' +
-      'records subscription-request history at all, the ssh tunnels). It separates "the backend ' +
+      'records subscription-request history at all, node integration and shared-list catalogs, ' +
+      'the ssh tunnels). Optional 3.3 APIs are checked independently of the base 3.0 floor. ' +
+      'It separates "the backend ' +
       'is down" from "our credentials are wrong": SHM proves liveness on an unauthenticated ' +
       'healthcheck, and a 401/403 from either system is reported as credentialsRejected rather ' +
       'than as an outage. Cached for 5 minutes. Run it first when a tool fails in an unclear ' +
       'way, and run it before trusting anything: whatever OpenAPI file you hold for either ' +
       'system lags production and lies. It also states whether the two backends are new enough ' +
-      `for the whole tool set — SHM ${MIN_SHM_VERSION} and Remnawave ${MIN_REMNA_VERSION} are ` +
+      `for the base tool set — SHM ${MIN_SHM_VERSION} and Remnawave ${MIN_REMNA_VERSION} are ` +
       'the floors, and a version ' +
       'below one of them is reported as a warning here rather than discovered later as an ' +
       'unexplained refusal.',
@@ -221,6 +228,8 @@ export function createPlatformProbeTool(
         panelConfig,
         userBaseline,
         userFiltered,
+        integrations,
+        sharedLists,
       ] = await Promise.all([
         shmOn ? settleHttp(ctx.shm.get<unknown>('/admin/spool/statuses')) : skipped<unknown>(),
         remnaOn ? settleHttp(ctx.remna.get<unknown>('/api/system/metadata')) : skipped<unknown>(),
@@ -315,7 +324,12 @@ export function createPlatformProbeTool(
               }),
             )
           : skipped<unknown>(),
+        remnaOn ? settleHttp(ctx.remna.get<unknown>('/api/node-integrations')) : skipped<unknown>(),
+        remnaOn ? settleHttp(ctx.remna.get<unknown>('/api/node-plugins/shared-lists')) : skipped<unknown>(),
       ]);
+
+      const integrationAccess = catalogCapability(remnaOn, '/api/node-integrations', 'nodeIntegrations', integrations);
+      const sharedListAccess = catalogCapability(remnaOn, '/api/node-plugins/shared-lists', 'sharedLists', sharedLists);
 
       const [pgOpen, mysqlOpen, abuseOpen] = await Promise.all([
         deps.probeTcp(cfg.postgres.host, cfg.postgres.port, TUNNEL_TIMEOUT_MS),
@@ -339,9 +353,9 @@ export function createPlatformProbeTool(
         ? str(asRecord(metaRecord.app).version ?? metaRecord.version)
         : null;
 
-      // Правило классификации: успех → true, явный отказ бэкенда (4xx) →
-      // false, «система вообще не ответила базовой проверкой ИЛИ конкретный
-      // вызов ничего не доказал» (сеть, таймаут, 5xx) → unknown. Смешивать
+      // Правило классификации: успех → true, отказ параметра/маршрута (400/404)
+      // → false, «система не ответила базовой проверкой ИЛИ конкретный вызов
+      // ничего не доказал» (права, лимит, сеть, таймаут, 5xx) → unknown. Смешивать
       // нельзя: 'unknown' оставляет инструмент видимым, false — прячет его.
       const filterWorks: boolean | 'unknown' = !statuses.ok
         ? 'unknown'
@@ -351,8 +365,8 @@ export function createPlatformProbeTool(
 
       /**
        * Записывает ли панель историю обращений за подпиской. Обратите внимание
-       * на `'unknown'` в ветке отказа: для остальных возможностей 4xx означает
-       * «бэкенд отверг ЭТОТ параметр», то есть ответ по существу, а здесь 4xx
+       * на `'unknown'` в ветке отказа: для остальных возможностей 400/404 означает
+       * «бэкенд отверг ЭТОТ параметр», то есть ответ по существу, а здесь 404
        * приходит от МАРШРУТА КОНФИГУРАЦИИ — его нет на панелях до 3.2.0. Прочесть
        * это как `false` значило бы на каждой 3.1.x объявлять, что панель истории
        * не пишет, и превратить subscription_inspect в источник ровно той
@@ -445,11 +459,21 @@ export function createPlatformProbeTool(
           'shm.dry_run': 'unknown',
           'remna.subscriptionRequestHistory': srhRecorded,
           'remna.realtimeBandwidth': !metadata.ok ? 'unknown' : realtime.ok ? true : realtime.verdict,
+          'remna.nodeIntegrations': integrationAccess.capability,
+          'remna.sharedLists': sharedListAccess.capability,
           'tunnel.postgres': pgOpen,
           'tunnel.mysql': cfg.mysql === null ? false : mysqlOpen,
           'tunnel.abuse': abuseOpen,
         },
         warnings: [
+          ...integrationAccess.warnings,
+          ...sharedListAccess.warnings,
+          ...(remnaOn && !realtime.ok && realtime.status === 404
+            ? [warn('realtime_route_absent',
+              '/api/bandwidth-stats/nodes/realtime returned 404. Remnawave 3.3.2 retains a ' +
+              'route constant without a handler; realtime traffic is unavailable here. ' +
+              'The historical bandwidth tools still report period totals, not realtime rates.')]
+            : []),
           ...(shmOn && remnaOn
             ? []
             : [

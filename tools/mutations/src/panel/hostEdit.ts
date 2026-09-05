@@ -1,8 +1,12 @@
 import { z } from 'zod';
 import { buildDiff } from '@hq/confirm';
 import type { ToolContext } from '@hq/types';
+import { defaultBackupDir } from '../backups.js';
 import { defineMutation, planIdField } from '../kit.js';
 import { assertNoMaskedValues } from '../server/edit.js';
+import { hostMapperAuditDeps, hostMapperSchema, mapperHash, mapperSummary } from './hostMapper.js';
+import { loadHostPatchBackup, saveHostPatchBackup } from './hostPatchBackup.js';
+import { panelMutationError } from './panelMutationError.js';
 import type { MutationDeps, MutationTool, PlanDraft, PlanGuard } from '../kit.js';
 
 /**
@@ -105,6 +109,14 @@ const input = z.object({
     .boolean()
     .optional()
     .describe('Скрыть хост из выдачи, оставив его включённым для тех, кто уже знает адрес.'),
+  mapper: hostMapperSchema.optional().describe(
+    'Remnawave 3.3: полная замена mapper. xrayJson/mihomo/base64/singbox содержат ' +
+      'упорядоченные copy/set/unset. {} очищает все форматы. Пропуск сохраняет mapper.',
+  ),
+  restore_from: z.string().min(1).optional().describe(
+    'Восстановить точное тело отката из backup host_edit; несовместимо с другими полями правки. ' +
+      'Сначала строит новый план, затем требует подтверждение.',
+  ),
   ...planIdField,
 });
 
@@ -143,6 +155,7 @@ const bodySchema = z.strictObject({
   securityLayer: z.enum(SECURITY_LAYERS).optional(),
   serverDescription: z.string().max(30).nullable().optional(),
   tags: z.array(z.string().max(36)).max(10).optional(),
+  mapper: hostMapperSchema.optional(),
 });
 
 export type HostPatchBody = z.infer<typeof bodySchema>;
@@ -154,7 +167,22 @@ const HOSTS_PATH = '/api/hosts';
  * входит: его двигает любая перестановка хостов в UI, а к содержимому правки
  * она отношения не имеет — сверка по нему отвергала бы планы за чужой drag&drop.
  */
-const GUARD_KEYS = [...TEXT_FIELDS, ...BOOL_FIELDS, 'port', 'tags'];
+const GUARD_KEYS = [...TEXT_FIELDS, ...BOOL_FIELDS, 'port', 'tags', 'mapperHash'];
+
+const bodyRefSchema = z.strictObject({ path: z.string().min(1), sha256: z.string().regex(/^[a-f0-9]{64}$/) });
+const bundleSchema = z.strictObject({ body: bodySchema, rollbackBody: bodySchema });
+
+async function readBundle(dir: string, path: string, uuid: string, expectedHash?: string) {
+  const payload = await loadHostPatchBackup(dir, path, uuid, expectedHash);
+  const parsed = bundleSchema.safeParse(payload);
+  if (!parsed.success || parsed.data.body.uuid !== uuid || parsed.data.rollbackBody.uuid !== uuid ||
+      parsed.data.body.mapper === undefined || parsed.data.rollbackBody.mapper === undefined) {
+    refuse('backup не содержит разрешённые тела PATCH и отката для этого хоста (mapper/getRaw).');
+  }
+  assertNoMaskedValues(parsed.data.body, 'host_edit: тело PATCH из backup');
+  assertNoMaskedValues(parsed.data.rollbackBody, 'host_edit: тело отката из backup');
+  return parsed.data;
+}
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -183,7 +211,9 @@ function refuse(message: string): never {
  * восстановления, а из масок хост не пересоздашь.
  */
 export async function readHostsRaw(ctx: ToolContext): Promise<Record<string, unknown>[]> {
-  const raw = await ctx.remna.getRaw<unknown>(HOSTS_PATH);
+  const raw = await ctx.remna.getRaw<unknown>(HOSTS_PATH).catch((error: unknown) => {
+    throw panelMutationError('GET /api/hosts', error);
+  });
   if (Array.isArray(raw)) return raw.map(asRecord);
   const nested = asRecord(raw).hosts;
   if (Array.isArray(nested)) return nested.map(asRecord);
@@ -213,6 +243,8 @@ export function hostState(host: Record<string, unknown>): Record<string, unknown
   for (const key of BOOL_FIELDS) state[key] = key in host ? host[key] : null;
   state.tags = Array.isArray(host.tags) ? host.tags : [];
   state.inboundUuid = asRecord(host.inbound).configProfileInboundUuid ?? null;
+  state.mapperHash = mapperHash(host.mapper);
+  state.mapperSummary = mapperSummary(host.mapper);
   return state;
 }
 
@@ -277,13 +309,14 @@ function patchOf(i: Input): Record<string, unknown> {
   if (i.tags !== undefined) patch.tags = i.tags;
   if (i.is_disabled !== undefined) patch.isDisabled = i.is_disabled;
   if (i.is_hidden !== undefined) patch.isHidden = i.is_hidden;
+  if (i.mapper !== undefined) patch.mapper = i.mapper;
   return patch;
 }
 
 const guard: PlanGuard = {
   keys: GUARD_KEYS,
   read: async (plan, ctx) => {
-    const uuid = asRecord(asRecord(plan.after).body).uuid;
+    const uuid = asRecord(plan.before).uuid;
     if (typeof uuid !== 'string') {
       refuse('снимок плана не несёт uuid хоста — применять его нельзя, постройте план заново.');
     }
@@ -303,13 +336,13 @@ const EFFECTS: readonly string[] = [
     'изменённых полей вместе со всеми булевыми.',
 ];
 
-export function hostEdit(deps: MutationDeps): MutationTool {
+export function hostEdit(deps: MutationDeps, backupDir = defaultBackupDir()): MutationTool {
   return defineMutation<Input>(
     {
       name: 'host_edit',
       description:
         'Правка хоста Remnawave: подпись, адрес, порт, SNI/host/path/ALPN/fingerprint, слой ' +
-        'безопасности, описание, теги, включение и скрытие. Хост адресуется uuid В ТЕЛЕ ' +
+        'безопасности, описание, теги, включение, скрытие и mapper 3.3. Хост адресуется uuid В ТЕЛЕ ' +
         'PATCH /api/hosts. Снимок читается нередактированным каналом, и в тело всегда уходят ' +
         'все булевы поля: запрос без isDisabled включает выключенный хост. Инбаунд, ноды и ' +
         'сырые блобы (xhttpExtraParams / muxParams / sockoptParams / finalMask) не меняются — ' +
@@ -325,16 +358,30 @@ export function hostEdit(deps: MutationDeps): MutationTool {
       target: (i) => ({ system: 'remna', id: i.uuid }),
 
       plan: async (i, ctx): Promise<PlanDraft> => {
-        const patch = patchOf(i);
+        let patch = patchOf(i);
+        if (i.restore_from !== undefined) {
+          if (Object.keys(patch).length > 0) refuse('restore_from несовместим с полями правки.');
+          const saved = await readBundle(backupDir, i.restore_from, i.uuid);
+          const { uuid: _target, ...restored } = saved.rollbackBody;
+          patch = restored;
+        }
         if (Object.keys(patch).length === 0) {
           refuse(
             'не передано ни одного изменяемого поля. Назовите хотя бы одно: remark, address, ' +
               'port, sni, host, path, alpn, fingerprint, security_layer, server_description, ' +
-              'tags, is_disabled, is_hidden.',
+              'tags, is_disabled, is_hidden, mapper или restore_from.',
           );
         }
 
         const host = await readHostRaw(ctx, i.uuid, 'host_edit');
+        if (patch.mapper !== undefined) {
+          if (!hostMapperSchema.safeParse(host.mapper).success) {
+            refuse('исходный mapper отсутствует, некорректен или маскирован; точный откат требует getRaw и Remnawave 3.3.');
+          }
+          if (Object.keys(patch).some((key) => host[key] === undefined)) {
+            refuse('панель не вернула прежнее значение изменяемого поля; точный откат mapper-правки неизвестен.');
+          }
+        }
         const before = hostState(host);
         const body = mergeHost(host, patch);
         const after = hostState({ ...host, ...patch });
@@ -357,6 +404,21 @@ export function hostEdit(deps: MutationDeps): MutationTool {
           );
         }
 
+        if (patch.mapper !== undefined) {
+          const bodyRef = await saveHostPatchBackup(backupDir, body, rollbackBody, ctx.now());
+          effects.push(
+            'Mapper заменяется целиком; операции выполняются в заданном порядке после генерации ' +
+              'клиентского конфига. Значения скрыты, показаны только счётчики и SHA-256. ' +
+              'Точные тела PATCH/отката сохранены в закрытом backup (0700/0600). ' +
+              'rollback вызывает host_edit с restore_from и требует отдельный план/подтверждение.',
+          );
+          return {
+            before, after: { ...after, bodyRef }, diff: buildDiff(before, after, ctx.profile),
+            sideEffects: effects,
+            rollback: { method: 'TOOL', path: 'host_edit', body: { uuid: i.uuid, restore_from: bodyRef.path } },
+          };
+        }
+
         return {
           before,
           // `body` лежит рядом с предсказанным состоянием: применению нужно
@@ -372,20 +434,41 @@ export function hostEdit(deps: MutationDeps): MutationTool {
       apply: async (plan, ctx) => {
         // План приезжает С ДИСКА, подписи у снимка нет: тело перепроверяется
         // той же схемой, что и на планировании, и той же проверкой на маску.
-        const parsed = bodySchema.safeParse(asRecord(plan.after).body);
+        const after = asRecord(plan.after);
+        const uuid = asRecord(plan.before).uuid;
+        if (typeof uuid !== 'string') refuse('в плане нет uuid хоста.');
+        let rawBody = after.body;
+        if (after.bodyRef !== undefined) {
+          const ref = bodyRefSchema.safeParse(after.bodyRef);
+          if (!ref.success || rawBody !== undefined) refuse('в плане некорректная ссылка на backup.');
+          const rollback = plan.rollback;
+          if (rollback?.method !== 'TOOL' || rollback.path !== 'host_edit' ||
+              asRecord(rollback.body).uuid !== uuid || asRecord(rollback.body).restore_from !== ref.data.path) {
+            refuse('ссылка отката в плане не совпадает с проверенным backup.');
+          }
+          const saved = await readBundle(backupDir, ref.data.path, uuid, ref.data.sha256);
+          if (mapperHash(saved.body.mapper) !== after.mapperHash ||
+              mapperHash(saved.rollbackBody.mapper) !== asRecord(plan.before).mapperHash) {
+            refuse('целостность mapper в backup не совпадает с рассмотренным планом.');
+          }
+          rawBody = saved.body;
+        }
+        const parsed = bodySchema.safeParse(rawBody);
         if (!parsed.success) {
           refuse('снимок плана не несёт разрешённого тела PATCH — постройте план заново.');
         }
+        if (parsed.data.uuid !== uuid || (parsed.data.mapper !== undefined && after.bodyRef === undefined)) {
+          refuse('uuid/mapper тела не совпадает с разрешённым планом; постройте план заново.');
+        }
         assertNoMaskedValues(parsed.data, 'host_edit: тело PATCH /api/hosts из снимка плана');
 
-        // sendRaw, а не send: ответ панели — это тот же хост, и редакция его
-        // ответа нам не мешает, но и не помогает. Наружу он всё равно уходит
-        // через `redact` исполнителя, поэтому берём обычный send: сырой ответ
-        // в журнале мутаций был бы лишним хранением пароля из finalMask.
-        const updated = await ctx.remna.send<unknown>('PATCH', HOSTS_PATH, parsed.data);
+        // Raw нужен для точного хеша mapper; наружу и в журнал идут только hostState и счётчики.
+        const updated = await ctx.remna.sendRaw<unknown>('PATCH', HOSTS_PATH, parsed.data).catch((error: unknown) => {
+          throw panelMutationError('PATCH /api/hosts', error);
+        });
         return { uuid: parsed.data.uuid, host: hostState(asRecord(updated)) };
       },
     },
-    deps,
+    hostMapperAuditDeps(deps),
   );
 }

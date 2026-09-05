@@ -1,7 +1,10 @@
 import { defineTool } from '@hq/registry';
+import { scrubSecretShapesDeep } from '@hq/redact';
 import { z } from 'zod';
 import type { Degraded, ToolWarning } from '@hq/types';
 import { asArray, asRecord, capLimit, num, settle, str, take, warn } from '../kit.js';
+import { diagnoseReferences, resolveReferences, scanReferences } from '../plugins/dependencies.js';
+import { parseCatalog, partial, pluginNodeCoverage, strings } from '../plugins/sources.js';
 
 /**
  * Контроллер node-plugins панели 3.2.3. Раздел TORRENT_BLOCKER объявляет три
@@ -184,9 +187,8 @@ export const torrentReports = defineTool({
       settle(ctx.remna.get<unknown>(NODES_PATH)),
     ]);
 
-    const pluginRows = asArray(asRecord(take(plugins, 'remna', degraded, null)).nodePlugins).map(
-      asRecord,
-    );
+    const pluginCatalog = parseCatalog(take(plugins, 'remna', degraded, null), 'nodePlugins', 'uuid');
+    const pluginRows = pluginCatalog.rows;
     // Карточки читаются только у тех плагинов, которые в списке есть. Отказ
     // одной карточки отмечается один раз и не отменяет остальные.
     const details = await Promise.all(
@@ -196,14 +198,47 @@ export const torrentReports = defineTool({
     );
     let detailsRead = 0;
     const configs: Record<string, unknown>[] = [];
-    for (const detail of details) {
+    const configRows: Record<string, unknown>[] = [];
+    for (const [index, detail] of details.entries()) {
       if (!detail.ok) {
         degraded.push({ system: 'remna', error: detail.error });
         continue;
       }
+      const config = asRecord(detail.value).pluginConfig;
+      if (config === null || typeof config !== 'object' || Array.isArray(config)) {
+        degraded.push({ system: 'remna', error: 'A plugin card did not contain a readable configuration.' });
+        continue;
+      }
       detailsRead += 1;
-      configs.push(asRecord(asRecord(detail.value).pluginConfig));
+      configs.push(asRecord(config));
+      configRows.push(pluginRows[index] ?? {});
     }
+    const pluginCoverageComplete = pluginCatalog.complete && detailsRead === pluginRows.length;
+    if (!pluginCoverageComplete) partial(warnings, 'Plugin configuration coverage is incomplete; unread plugins can still have an enabled torrent blocker.');
+    const referenceScans = ctx.profile === 'human' ? configs.map(scanReferences) : [];
+    const sharedCatalog = ctx.profile === 'human'
+      ? await diagnoseReferences(ctx, referenceScans, degraded, warnings) : null;
+    const combinedScan = {
+      names: [...new Set(referenceScans.flatMap((one) => one.names))],
+      complete: pluginCoverageComplete && referenceScans.every((one) => one.complete),
+    };
+    const configurations = configs.map((config, index) => {
+      const section = asRecord(config.torrentBlocker);
+      const tags = strings(section.includeRuleTags);
+      if (tags !== null && tags.length > 100) partial(warnings, 'Only the first 100 rule tags are shown per plugin; includeRuleTagCount retains the full count.');
+      return {
+        uuid: str(configRows[index]?.uuid),
+        torrentBlockerEnabled: typeof section.enabled === 'boolean' ? section.enabled : null,
+        rulePlacement: typeof section.rulePlacement === 'number' && Number.isFinite(section.rulePlacement) &&
+          section.rulePlacement >= 0 && section.rulePlacement <= 1000 ? section.rulePlacement : null,
+        includeRuleTags: ctx.profile === 'human' ? tags?.slice(0, 100) ?? null : null,
+        includeRuleTagCount: tags?.length ?? null,
+        sharedListReferences: ctx.profile === 'human'
+          ? resolveReferences(referenceScans[index] ?? { names: [], complete: false }, sharedCatalog) : null,
+      };
+    });
+    const firstBlockerIndex = configs.findIndex((config) => Object.keys(asRecord(config.torrentBlocker)).length > 0);
+    const firstConfiguration = configurations[firstBlockerIndex];
 
     // «Включён» — только явное true. Отсутствие секции torrentBlocker и
     // нечитаемая карточка обязаны остаться null: false здесь означало бы
@@ -213,10 +248,9 @@ export const torrentReports = defineTool({
       .map((cfg) => asRecord(cfg.torrentBlocker))
       .filter((section) => Object.keys(section).length > 0);
     const enabledFlags = blockerSections.map((section) => section.enabled);
-    const torrentBlockerEnabled =
-      detailsRead === 0 || blockerSections.length === 0
-        ? null
-        : enabledFlags.some((flag) => flag === true);
+    const torrentBlockerEnabled = enabledFlags.some((flag) => flag === true) ? true
+      : pluginCoverageComplete && enabledFlags.length > 0 && enabledFlags.every((flag) => flag === false)
+        ? false : null;
     const ignore = asRecord(blockerSections[0]?.ignoreLists);
     const ignoredUserIds = asArray(ignore.userId)
       .map((one) => num(one, Number.NaN))
@@ -224,9 +258,13 @@ export const torrentReports = defineTool({
     // Считается только по НАСТОЯЩЕМУ массиву: профилю bot список приезжает
     // маркером '<redacted>' (ключ `ip` — PII), и asArray сделал бы из него
     // одну строку, то есть «в игнор-листе один адрес» вместо «спросить нельзя».
-    const ignoredIpCount = Array.isArray(ignore.ip) ? ignore.ip.length : null;
+    const ignoredIpCount = Array.isArray(ignore.ip)
+      ? ignore.ip.filter((one) => typeof one === 'string' && !one.startsWith('ext:')).length : null;
 
-    const nodeRows = asArray(take(nodes, 'remna', degraded, null)).map(asRecord);
+    const nodeCatalog = parseCatalog(take(nodes, 'remna', degraded, null), 'nodes', 'uuid');
+    const nodeRows = nodeCatalog.rows;
+    const nodesComplete = pluginNodeCoverage(nodeCatalog);
+    if (!nodesComplete) partial(warnings, 'The node source is incomplete; fleet plugin coverage is unknown.');
     const uncovered = nodeRows
       .filter((row) => str(row.activePluginUuid) === null && row.isDisabled !== true)
       .map((row) => str(row.name) ?? str(row.uuid) ?? 'unnamed');
@@ -292,7 +330,7 @@ export const torrentReports = defineTool({
     const data = user_id === null ? rawRows : rawRows.filter((row) => row.userId === user_id);
     const foreign = rawRows.length - data.length;
 
-    if (plugins.ok && pluginRows.length === 0) {
+    if (pluginCatalog.complete && pluginRows.length === 0) {
       warnings.push(
         warn(
           'torrent_blocker_not_installed',
@@ -325,7 +363,7 @@ export const torrentReports = defineTool({
         ),
       );
     }
-    if (nodes.ok && uncovered.length > 0) {
+    if (nodesComplete && uncovered.length > 0) {
       warnings.push(
         warn(
           'nodes_without_torrent_blocker',
@@ -411,13 +449,22 @@ export const torrentReports = defineTool({
 
     return {
       plugin: {
-        installed: plugins.ok ? pluginRows.length : null,
+        installed: pluginCatalog.declaredTotal,
         configsRead: detailsRead,
+        configsComplete: pluginCoverageComplete,
         torrentBlockerEnabled,
         blockDurationSeconds: finite(asRecord(blockerSections[0]).blockDuration),
+        settingsPluginUuid: firstConfiguration?.uuid ?? null,
+        rulePlacement: firstConfiguration?.rulePlacement ?? null,
+        includeRuleTags: scrubSecretShapesDeep(firstConfiguration?.includeRuleTags ?? null).value,
+        includeRuleTagCount: firstConfiguration?.includeRuleTagCount ?? null,
+        configurations: scrubSecretShapesDeep(configurations).value,
+        sharedListReferences: ctx.profile === 'human'
+          ? resolveReferences(combinedScan, sharedCatalog) : null,
+        sharedListReferencesComplete: ctx.profile === 'human' ? combinedScan.complete : null,
         ignoredUserIds,
         ignoredIpCount,
-        nodesWithoutPlugin: nodes.ok ? uncovered : null,
+        nodesWithoutPlugin: nodesComplete ? uncovered : null,
       },
       stats: stats.ok
         ? {

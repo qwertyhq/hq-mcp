@@ -27,7 +27,7 @@ import { isAbsolute, resolve, sep } from 'node:path';
  * то есть «откат из плана» перестаёт существовать примерно через час после
  * применения. Файл здесь не подметается никем: откат обязан пережить смену.
  */
-export type BackupKind = 'template' | 'storage';
+export type BackupKind = 'template' | 'storage' | 'host' | 'host_cleanup';
 
 export interface BackupRecord {
   kind: BackupKind;

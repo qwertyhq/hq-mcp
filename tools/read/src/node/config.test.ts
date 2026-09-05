@@ -26,7 +26,7 @@ interface Answer {
   nodeTags: string[] | null;
   plugins: {
     installed: number | null;
-    items: { configRead: boolean; configSections: string[]; nodesUsing: string[] | null }[];
+    items: { configRead: boolean; configSections: string[]; nodesUsing: string[] | null; sharedListReferences: Array<{ name: string; exists: boolean | null }> | null }[];
   } | null;
   node: unknown;
   warnings: { code: string; message: string }[];
@@ -204,5 +204,57 @@ describe('node_config_audit', () => {
     expect(result.plugins?.items[0]?.configRead).toBe(true);
     expect(result.plugins?.items[0]?.configSections).toEqual(['torrentBlocker']);
     expect(result.plugins?.items[0]?.nodesUsing).toEqual(['Poland']);
+  });
+
+  it('shows ordered node integrations separately from computed xray config', async () => {
+    const nodeUuid = '44000000-0000-4000-8000-000000000001';
+    const ctx = makeCtx({ remnaGet: (path) => {
+      if (path === '/api/config-profiles') return { total: 0, configProfiles: [] };
+      if (path === '/api/nodes/tags') return { tags: [] };
+      if (path === '/api/nodes') return [];
+      if (path === `/api/nodes/${nodeUuid}`) return { uuid: nodeUuid, name: 'Example', integrationUuids: ['second', 'first'] };
+      throw new Error(`unexpected path ${path}`);
+    } });
+    const out = await run({ node_uuid: nodeUuid, include_plugins: false }, ctx);
+    expect(out.node).toMatchObject({ integrationUuids: ['second', 'first'] });
+    expect(out.warnings.map((one) => one.code)).toContain('node_integrations_separate_config');
+  });
+
+  it.each([
+    { catalog: { total: 0, sharedLists: [] }, exists: false },
+    { catalog: new Error('403'), exists: null },
+    { catalog: { total: 1, sharedLists: [] }, exists: null },
+  ])('diagnoses external plugin lists without trusting embedded lists', async ({ catalog, exists }) => {
+    const ctx = makeCtx({ remnaGet: (path) => {
+      if (path === '/api/config-profiles') return { total: 0, configProfiles: [] };
+      if (path === '/api/nodes/tags') return { tags: [] };
+      if (path === '/api/nodes') return [];
+      if (path === '/api/node-plugins') return { total: 1, nodePlugins: [{ uuid: 'p-1', name: 'Blocker' }] };
+      if (path === '/api/node-plugins/p-1') return { pluginConfig: {
+        torrentBlocker: { ignoreLists: { ip: ['ext:trusted', '198.51.100.8'] } },
+        sharedLists: [{ name: 'ext:trusted', type: 'ipList', items: ['198.51.100.9'] }],
+      } };
+      if (path === '/api/node-plugins/shared-lists') { if (catalog instanceof Error) throw catalog; return catalog; }
+      throw new Error(`unexpected path ${path}`);
+    } });
+    const out = await run({}, ctx);
+    expect(out.plugins?.items[0]?.sharedListReferences).toEqual([{ name: 'trusted', reference: 'ext:trusted', exists }]);
+    expect(out.warnings.some((one) => one.code === 'shared_list_reference_missing')).toBe(exists === false);
+    expect(JSON.stringify(out)).not.toContain('198.51.100');
+  });
+
+  it('does not report an unreadable plugin configuration as an empty successful card', async () => {
+    const ctx = makeCtx({ remnaGet: (path) => {
+      if (path === '/api/config-profiles') return { total: 0, configProfiles: [] };
+      if (path === '/api/nodes/tags') return { tags: [] };
+      if (path === '/api/nodes') return [];
+      if (path === '/api/node-plugins') return { total: 1, nodePlugins: [{ uuid: 'p-1', name: 'Blocker' }] };
+      if (path === '/api/node-plugins/p-1') return { pluginConfig: null };
+      throw new Error(`unexpected path ${path}`);
+    } });
+    const out = await run({}, ctx);
+    expect(out.plugins?.items[0]?.configRead).toBe(false);
+    expect(out.plugins?.items[0]?.sharedListReferences).toBeNull();
+    expect(out.warnings.map((one) => one.code)).toContain('partial_result');
   });
 });

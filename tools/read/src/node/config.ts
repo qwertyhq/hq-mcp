@@ -3,6 +3,9 @@ import { scrubSecretShapesDeep } from '@hq/redact';
 import { z } from 'zod';
 import type { SecretShapeHit } from '@hq/redact';
 import type { Degraded, ToolWarning } from '@hq/types';
+import { diagnoseReferences, resolveReferences, scanReferences } from '../plugins/dependencies.js';
+import type { ReferenceScan, SharedListReference } from '../plugins/dependencies.js';
+import { parseCatalog, partial, pluginNodeCoverage, strings } from '../plugins/sources.js';
 import {
   asArray,
   asRecord,
@@ -155,6 +158,8 @@ interface PluginFacts {
   /** Имена секций конфигурации плагина. Значения не выносятся — форма чужая и растущая. */
   configSections: string[];
   nodesUsing: string[] | null;
+  sharedListReferences: SharedListReference[] | null;
+  sharedListReferencesComplete: boolean;
 }
 
 export const nodeConfigAudit = defineTool({
@@ -293,28 +298,46 @@ export const nodeConfigAudit = defineTool({
       });
     }
 
-    const nodeRows = asArray(take(nodes, 'remna', degraded, null)).map(asRecord);
-    const pluginRows = include_plugins
-      ? envelope(take(plugins, 'remna', degraded, null), 'nodePlugins').rows
-      : [];
+    const nodeCatalog = parseCatalog(take(nodes, 'remna', degraded, null), 'nodes', 'uuid');
+    const nodeRows = nodeCatalog.rows;
+    const nodesComplete = pluginNodeCoverage(nodeCatalog);
+    const pluginCatalog = include_plugins
+      ? parseCatalog(take(plugins, 'remna', degraded, null), 'nodePlugins', 'uuid') : null;
+    const pluginRows = pluginCatalog?.rows ?? [];
     const pluginFacts: PluginFacts[] = [];
+    const pluginScans: Array<ReferenceScan | null> = [];
     for (const row of pluginRows.slice(0, MAX_PLUGIN_DETAILS)) {
       const uuid = str(row.uuid);
       const card = uuid === null ? null : await settle(ctx.remna.get<unknown>(`${PLUGINS_PATH}/${uuid}`));
       if (card !== null && !card.ok) degraded.push({ system: 'remna', error: card.error });
+      const config = card?.ok === true ? asRecord(card.value).pluginConfig : null;
+      const configRead = config !== null && typeof config === 'object' && !Array.isArray(config);
+      pluginScans.push(configRead ? scanReferences(config) : null);
       pluginFacts.push({
         uuid,
         name: str(row.name),
-        configRead: card?.ok === true,
+        configRead,
         configSections:
-          card?.ok === true ? Object.keys(asRecord(asRecord(card.value).pluginConfig)) : [],
-        nodesUsing: nodes.ok
+          configRead ? Object.keys(asRecord(config)) : [],
+        nodesUsing: nodesComplete
           ? nodeRows
               .filter((one) => str(one.activePluginUuid) === uuid)
               .map((one) => str(one.name) ?? 'unnamed')
           : null,
+        sharedListReferences: null,
+        sharedListReferencesComplete: false,
       });
     }
+    const sharedCatalog = await diagnoseReferences(ctx, pluginScans.filter((one): one is ReferenceScan => one !== null), degraded, warnings);
+    for (const [index, facts] of pluginFacts.entries()) {
+      const scan = pluginScans[index];
+      facts.sharedListReferences = scan == null ? null : resolveReferences(scan, sharedCatalog);
+      facts.sharedListReferencesComplete = scan?.complete ?? false;
+    }
+    const pluginCoverageComplete = pluginCatalog?.complete === true &&
+      pluginScans.length === pluginRows.length && pluginScans.every((one) => one?.complete === true);
+    if (include_plugins && !pluginCoverageComplete) partial(warnings, 'Plugin details or external dependency scans are incomplete; unchecked plugins remain unknown.');
+    if (include_plugins && !nodesComplete) partial(warnings, 'The node source is incomplete; full plugin usage cannot be established.');
 
     let node: Record<string, unknown> | null = null;
     if (wantedNode !== null && UUID_RE.test(wantedNode)) {
@@ -323,7 +346,15 @@ export const nodeConfigAudit = defineTool({
       else node = buildNode(asRecord(card.value));
     }
 
-    const scrubbed = scrubSecretShapesDeep({ profiles, plugins: pluginFacts, node });
+    const nodeIntegrations = nodeRows.slice(0, cap).map((row) => ({
+      uuid: str(row.uuid), name: str(row.name), integrationUuids: strings(row.integrationUuids)?.slice(0, 20) ?? null,
+    }));
+    if (nodeIntegrations.some((row) => (row.integrationUuids?.length ?? 0) > 0) ||
+        (strings(node?.integrationUuids)?.length ?? 0) > 0) {
+      warnings.push(warn('node_integrations_separate_config', 'Node integrations are applied in the listed order, separately from the computed Xray profile. Later top-level values override earlier ones; node_integrations_read resolves these bindings.'));
+    }
+
+    const scrubbed = scrubSecretShapesDeep({ profiles, plugins: pluginFacts, node, nodeIntegrations });
     hits.push(...scrubbed.hits);
 
     const orphans = profiles.filter((one) => one.nodeCount === 0).map((one) => one.name ?? one.uuid);
@@ -443,9 +474,10 @@ export const nodeConfigAudit = defineTool({
       },
       nodeTags: nodeTags.ok ? tagList : null,
       plugins: include_plugins
-        ? { installed: plugins.ok ? pluginRows.length : null, items: scrubbed.value.plugins }
+        ? { installed: pluginCatalog?.declaredTotal ?? null, complete: pluginCoverageComplete, items: scrubbed.value.plugins }
         : null,
       node: scrubbed.value.node,
+      nodeIntegrations: { complete: nodeCatalog.complete && nodeRows.length <= cap, items: scrubbed.value.nodeIntegrations },
       warnings,
       degraded,
     };
@@ -486,6 +518,7 @@ function buildNode(row: Record<string, unknown>): Record<string, unknown> {
       .map((one) => str(one.tag))
       .filter((one): one is string => one !== null),
     activePluginUuid: str(row.activePluginUuid),
+    integrationUuids: strings(row.integrationUuids)?.slice(0, 20) ?? null,
     host: {
       hostname: str(info.hostname),
       platform: str(info.platform),

@@ -22,7 +22,7 @@ const tunnel: TunnelConfig = {
 };
 
 describe('createReadTools', () => {
-  it('builds exactly the 34 read tools: 16 from the design, two from the 2026-08-13 data audit, eight from the API-coverage audit, five from the Remnawave surface audit and three from the SHM client-surface audit the same day', () => {
+  it('builds exactly 37 read tools including the Remnawave 3.3 diagnostics', () => {
     const names = createReadTools({ tunnel })
       .map((def) => def.name)
       .sort();
@@ -45,6 +45,8 @@ describe('createReadTools', () => {
       'infra_costs',
       'infra_map',
       'node_config_audit',
+      'node_geocheck',
+      'node_integrations_read',
       'notify_history',
       'panel_activity',
       'platform_probe',
@@ -52,6 +54,7 @@ describe('createReadTools', () => {
       'provisioning_diagnose',
       'server_inventory',
       'service_inspect',
+      'shared_lists_read',
       'spool_inspect',
       'sql_query',
       'squads_read',
@@ -76,7 +79,7 @@ describe('createReadTools', () => {
 
   it('registers all of them without a name or duplicate complaint', () => {
     const registry = createRegistry(createReadTools({ tunnel }));
-    expect(registry.list({ mode: 'ro', profile: 'human' })).toHaveLength(34);
+    expect(registry.list({ mode: 'ro', profile: 'human' })).toHaveLength(37);
   });
 
   it('shows the bot exactly the 20 tools of its allowlist and nothing else', () => {
@@ -150,6 +153,9 @@ describe('createReadTools', () => {
       // node_config_audit: вычисленный конфиг, имена профилей и теги инбаундов
       // — карта того, из чего собрана сеть.
       node_config_audit: { compare_computed: false },
+      node_geocheck: { action: 'result', job_id: 'job-123' },
+      node_integrations_read: {},
+      shared_lists_read: {},
       // panel_activity: история обращений — поток адресов всей базы, остальное
       // — операторская картина самой панели.
       panel_activity: { include_requests: false },

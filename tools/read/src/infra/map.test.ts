@@ -366,4 +366,38 @@ describe('infra_map', () => {
     expect(infraMap.profiles).toEqual(['human']);
     expect(infraMap.access).toBe('ro');
   });
+
+  it('summarizes mapper operations and preserves ordered node integrations without config values', async () => {
+    const ctx = makeCtx({ remnaGet: (path) => {
+      if (path === '/api/nodes') return [{
+        ...NODES[0], integrationUuids: ['integration-second', 'integration-first'],
+      }];
+      if (path === '/api/hosts') return [{
+        ...HOSTS[0], mapper: {
+          xrayJson: [{ op: 'set', to: 'password', value: 'DO-NOT-RETURN-MAPPER-VALUE' }],
+          singbox: [{ op: 'unset', to: 'tls.insecure' }, { op: 'copy', from: '$host.port', to: 'server_port' }],
+        },
+      }];
+      return routes(path);
+    } });
+    const result = await infraMap.handler({}, ctx) as {
+      nodes: Array<{ integrationUuids: string[] | null }>;
+      hosts: Array<{ mapper: { configured: boolean; operations: Record<string, number> } | null }>;
+    };
+    expect(result.nodes[0]?.integrationUuids).toEqual(['integration-second', 'integration-first']);
+    expect(result.hosts[0]?.mapper).toEqual({
+      configured: true, operations: { xrayJson: 1, mihomo: 0, base64: 0, singbox: 2 },
+    });
+    expect(JSON.stringify(result)).not.toContain('DO-NOT-RETURN-MAPPER-VALUE');
+    expect(JSON.stringify(result)).not.toContain('tls.insecure');
+  });
+
+  it('distinguishes absent extension fields from configured empty arrays', async () => {
+    const result = await infraMap.handler({}, makeCtx({ remnaGet: routes })) as {
+      nodes: Array<{ integrationUuids: string[] | null }>;
+      hosts: Array<{ mapper: unknown }>;
+    };
+    expect(result.nodes[0]?.integrationUuids).toBeNull();
+    expect(result.hosts[0]?.mapper).toBeNull();
+  });
 });

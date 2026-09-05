@@ -75,6 +75,7 @@ export { hostEdit, mergeHost, previousOf, readHostRaw, readHostsRaw, hostState }
 export type { HostPatchBody } from './panel/hostEdit.js';
 export { MAX_CLEANUP_BATCH, hostCleanup } from './panel/hostCleanup.js';
 export { nodeManage } from './panel/nodeManage.js';
+export { panelSync } from './panel/sync.js';
 /**
  * Служебные инструменты мутационной поверхности. Мутаторами они не являются
  * (`defineMutation` не зовут, планов не строят), поэтому их нет и в
