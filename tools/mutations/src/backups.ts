@@ -27,7 +27,7 @@ import { isAbsolute, resolve, sep } from 'node:path';
  * то есть «откат из плана» перестаёт существовать примерно через час после
  * применения. Файл здесь не подметается никем: откат обязан пережить смену.
  */
-export type BackupKind = 'template' | 'storage';
+export type BackupKind = 'template' | 'storage' | 'host' | 'host_cleanup';
 
 export interface BackupRecord {
   kind: BackupKind;
@@ -61,6 +61,13 @@ export function sha256Of(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
+/** Canonical UTF-16 order keeps fingerprints independent of the host locale. */
+export function compareStrings(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
 /**
  * JSON с ОТСОРТИРОВАННЫМИ ключами — иначе сверка мира (§7.4) ловит порядок, а
  * не изменение. Perl рандомизирует порядок ключей хеша на каждый процесс, а
@@ -77,9 +84,7 @@ export function stableStringify(value: unknown): string {
 function sortDeep(value: unknown): unknown {
   if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map(sortDeep);
-  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
-    a < b ? -1 : a > b ? 1 : 0,
-  );
+  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => compareStrings(a, b));
   const out: Record<string, unknown> = {};
   for (const [key, item] of entries) out[key] = sortDeep(item);
   return out;

@@ -89,6 +89,8 @@ function makeProbe(value: boolean | 'unknown'): ProbeResult {
       'shm.dry_run': 'unknown',
       'remna.subscriptionRequestHistory': 'unknown',
       'remna.realtimeBandwidth': 'unknown',
+      'remna.nodeIntegrations': 'unknown',
+      'remna.sharedLists': 'unknown',
       'tunnel.mysql': 'unknown',
       'tunnel.postgres': value,
       'tunnel.abuse': 'unknown',

@@ -48,7 +48,7 @@ function exportedMutations(): Map<string, string> {
     } catch {
       continue;
     }
-    for (const call of source.matchAll(/(function\s+)?defineMutation</g)) {
+    for (const call of source.matchAll(/(function\s+)?defineMutation[<(]/g)) {
       if (call[1] !== undefined) continue;
       const named = /\bname:\s*(?:'([^']+)'|([A-Za-z_$][\w$]*))/.exec(
         source.slice(call.index, call.index + 600),

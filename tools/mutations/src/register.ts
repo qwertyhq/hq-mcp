@@ -4,6 +4,7 @@ import { bulkOps } from './bulk/bulkOps.js';
 import { hostCleanup } from './panel/hostCleanup.js';
 import { hostEdit } from './panel/hostEdit.js';
 import { nodeManage } from './panel/nodeManage.js';
+import { panelSync } from './panel/sync.js';
 import { provisioningRepair } from './provisioningRepair.js';
 import { serverEdit } from './server/edit.js';
 import { serviceLifecycle } from './service/lifecycle.js';
@@ -45,6 +46,7 @@ export const MUTATION_FACTORIES: readonly MutationFactory[] = [
   hostCleanup,
   hostEdit,
   nodeManage,
+  panelSync,
   provisioningRepair,
   serverEdit,
   serviceLifecycle,

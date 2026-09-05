@@ -56,6 +56,27 @@ function warningCodes(): string[] {
  * уже есть.
  */
 const KNOWN_CODES = [
+  // Remnawave 3.3 optional API access: missing route, denied scope, inconclusive probe.
+  'extension_api_unavailable',
+  'extension_probe_failed',
+  'extension_scope_denied',
+  'realtime_route_absent',
+  // GeoCheck queue state is separate from the diagnostic's success and report quality.
+  'geocheck_invalid_response',
+  'geocheck_job_failed',
+  'geocheck_node_failed',
+  'geocheck_pending',
+  'geocheck_report_invalid_fields',
+  'geocheck_report_summary',
+  'geocheck_report_truncated',
+  'geocheck_report_unavailable',
+  'geocheck_unavailable',
+  // References are only missing after complete source reads; an empty catalog is available.
+  'node_integration_missing',
+  'node_integrations_separate_config',
+  'node_integrations_unused',
+  'shared_list_reference_missing',
+  'shared_lists_unused',
   'addresses_masked',
   'attempts_recorded_none_succeeded',
   'autopay_comment_unreadable',

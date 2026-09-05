@@ -507,4 +507,77 @@ describe('platform_probe', () => {
     expect((await call(ctx, { refresh: true })).cached).toBe(false);
     expect(calls).toHaveLength(6);
   });
+
+  it('probes optional 3.3 catalogs instead of inferring access from metadata', async () => {
+    const ctx = makeCtx({
+      shmGet: shmRoutes,
+      shmList: shmRoutes,
+      remnaGet: (path, params) => {
+        if (path === '/api/node-integrations') return { total: 0, nodeIntegrations: [] };
+        if (path === '/api/node-plugins/shared-lists') return { total: 0, sharedLists: [] };
+        return remnaRoutes(path, params);
+      },
+    });
+    const result = await call(ctx);
+    expect(result.capabilities['remna.nodeIntegrations']).toBe(true);
+    expect(result.capabilities['remna.sharedLists']).toBe(true);
+  });
+
+  it.each([401, 403, 429, 500, 0])('keeps optional capabilities unknown on HTTP %i', async (status) => {
+    const ctx = makeCtx({
+      shmGet: shmRoutes,
+      shmList: shmRoutes,
+      remnaGet: (path, params) => {
+        if (path === '/api/node-integrations' || path === '/api/node-plugins/shared-lists' ||
+            path === '/api/bandwidth-stats/nodes/realtime') {
+          throw new HttpError(status, 'unavailable');
+        }
+        return remnaRoutes(path, params);
+      },
+    });
+    const result = await call(ctx);
+    expect(result.remna.reachable).toBe(true);
+    expect(result.capabilities['remna.nodeIntegrations']).toBe('unknown');
+    expect(result.capabilities['remna.sharedLists']).toBe('unknown');
+    expect(result.capabilities['remna.realtimeBandwidth']).toBe('unknown');
+    expect(result.warnings.map((w) => w.code)).toContain(
+      status === 401 || status === 403 ? 'extension_scope_denied' : 'extension_probe_failed',
+    );
+  });
+
+  it('reports absent optional routes and explains the realtime 404', async () => {
+    const ctx = makeCtx({
+      shmGet: shmRoutes,
+      shmList: shmRoutes,
+      remnaGet: (path, params) => {
+        if (path === '/api/node-integrations' || path === '/api/node-plugins/shared-lists' ||
+            path === '/api/bandwidth-stats/nodes/realtime') {
+          throw new HttpError(404, 'Cannot GET');
+        }
+        return remnaRoutes(path, params);
+      },
+    });
+    const result = await call(ctx);
+    expect(result.capabilities['remna.nodeIntegrations']).toBe(false);
+    expect(result.capabilities['remna.sharedLists']).toBe(false);
+    expect(result.warnings.map((w) => w.code)).toContain('extension_api_unavailable');
+    expect(result.warnings.find((w) => w.code === 'realtime_route_absent')?.message)
+      .toContain('historical');
+  });
+
+  it('does not accept malformed catalog replies as a supported capability', async () => {
+    const ctx = makeCtx({
+      shmGet: shmRoutes,
+      shmList: shmRoutes,
+      remnaGet: (path, params) => {
+        if (path === '/api/node-integrations') return { total: 0 };
+        if (path === '/api/node-plugins/shared-lists') return undefined;
+        return remnaRoutes(path, params);
+      },
+    });
+    const result = await call(ctx);
+    expect(result.capabilities['remna.nodeIntegrations']).toBe('unknown');
+    expect(result.capabilities['remna.sharedLists']).toBe('unknown');
+    expect(result.warnings.map((w) => w.code)).toContain('extension_probe_failed');
+  });
 });

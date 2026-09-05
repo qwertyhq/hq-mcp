@@ -305,6 +305,8 @@ const REMNA_NODE = {
   isConnected: true,
   isDisabled: false,
   usersOnline: 3,
+  integrationUuids: ['11111111-1111-4111-8111-111111111111'],
+  activePluginUuid: 'plugin-1',
   configProfile: { activeConfigProfileUuid: 'cp-1', activeInbounds: [{ uuid: 'in-1' }] },
 };
 
@@ -634,6 +636,28 @@ function shmGet(path: string): unknown {
 
 function remnaGet(path: string): unknown {
   if (path === '/api/system/metadata') return { app: { version: '3.2.3' } };
+  if (path === '/api/node-integrations') return { total: 1, nodeIntegrations: [{
+    uuid: '11111111-1111-4111-8111-111111111111', name: 'diagnostic-integration',
+    config: { telemetry: { endpoint: 'short-private-value' } },
+  }] };
+  if (path === '/api/node-plugins/shared-lists') return { total: 1, sharedLists: [{
+    name: 'diagnostic_list', type: 'ipList', itemsCount: 1,
+  }] };
+  if (path === '/api/node-plugins/shared-lists/diagnostic_list') return {
+    name: 'diagnostic_list', config: { type: 'ipList', items: ['192.0.2.201'] },
+  };
+  if (path === '/api/connections/geocheck/12') return {
+    isCompleted: true, isFailed: false,
+    result: {
+      nodeUuid: '11111111-1111-4111-8111-111111111112', success: true, message: null,
+      rawReport: {
+        schema: 1, tool: 'GeoCheck', duration_ms: 100,
+        identity: { ipv4: '192.0.2.202', asn: 64512, as_name: 'Test AS', as_country: 'DE' },
+        connectivity: { score: 90, targets: [{ id: 'target-1', name: 'Test', verdict: 'direct', score: 90 }] },
+        image: '<svg>short-private-value</svg>', details: { value: 'short-private-value' },
+      },
+    },
+  };
   // Порядок важен: сначала точные маршруты torrent-blocker, потом карточка
   // плагина по uuid — иначе '/api/node-plugins/' startsWith проглотил бы оба.
   if (path === '/api/node-plugins') {
@@ -1025,6 +1049,9 @@ const CASES: Case[] = [
   { name: 'config_read', input: { name: 'telegram' } },
   { name: 'subpage_read', input: {} },
   { name: 'node_config_audit', input: {} },
+  { name: 'node_integrations_read', input: {} },
+  { name: 'shared_lists_read', input: {} },
+  { name: 'node_geocheck', input: { action: 'result', job_id: '12' } },
   { name: 'client_reach', input: { user_id: 7 } },
   { name: 'device_inventory', input: {} },
   { name: 'panel_activity', input: {} },
@@ -1060,6 +1087,11 @@ describe('tool output survives the executor redaction', () => {
       expect([...new Set(maskedPaths(result.value))].sort()).toEqual(
         [...(DELIBERATE[one.name] ?? [])].sort(),
       );
+      if (['node_integrations_read', 'shared_lists_read', 'node_geocheck'].includes(one.name)) {
+        expect(result.value).toMatchObject({ degraded: [] });
+        expect(JSON.stringify(result.value)).not.toContain('short-private-value');
+        expect(JSON.stringify(result.value)).not.toContain('192.0.2.201');
+      }
     });
   }
 });

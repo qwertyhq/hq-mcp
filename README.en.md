@@ -22,11 +22,13 @@ platform_probe {}
 ```json
 {
   "shm":   { "configured": true, "reachable": true, "version": "2.19.4", "live": true },
-  "remna": { "configured": true, "reachable": true, "version": "3.2.3",
+  "remna": { "configured": true, "reachable": true, "version": "3.3.2",
              "runtime": { "instances": 6, "youngestUptimeSeconds": 54294 } },
-  "capabilities": { "shm.filter": false, "remna.realtimeBandwidth": true,
+  "capabilities": { "shm.filter": false, "remna.realtimeBandwidth": false,
+                    "remna.nodeIntegrations": true, "remna.sharedLists": true,
                     "tunnel.mysql": false, "…": "…" },
-  "warnings": [{ "code": "specs_are_stale", "message": "…" }]
+  "warnings": [{ "code": "realtime_route_absent", "message": "…" },
+               { "code": "specs_are_stale", "message": "…" }]
 }
 ```
 
@@ -72,8 +74,8 @@ The service is ACTIVE, the configuration snapshot is there, provisioning
 reported success — and the user that success belongs to does not exist in the
 panel. Neither system shows that on its own.
 
-Thirty-four tools read across both systems. `rw` mode adds fifteen writers:
-thirteen change live data, one applies a plan, and one reads the local mutation
+Thirty-seven tools read across both systems. `rw` mode adds sixteen writers:
+fourteen change live data, one applies a plan, and one reads the local mutation
 journal.
 
 ## Why composite tools instead of endpoint proxies
@@ -114,7 +116,14 @@ computed from unusable input must refuse to be a finding.
 Verified against **SHM 2.19.4** and **Remnawave 3.2.3** — both numbers read off
 the running deployment, not asserted from a specification.
 
-**The floors are SHM 2.18.0 and Remnawave 3.0.0.** The official `danuk/shm`
+**Remnawave 3.3.2** support adds node integrations, shared lists, Host Mapper,
+GeoCheck and confirmed synchronization. Contracts were checked against the
+3.3.2 source tag. Reads were checked against a live 3.3.2 panel; populated catalogs
+and new writes are tested with local API fixtures. See the
+[compatibility reference](COMPATIBILITY.md#remna-332).
+
+**The base-tool floors are SHM 2.18.0 and Remnawave 3.0.0.** The new feature
+group requires panel 3.3+. The official `danuk/shm`
 qualifies: every route these tools call is an upstream route, and no fork is
 needed. The one place a patch on that deployment was ever *visible* to a tool is
 the fourth flag of `GET /user/password-auth`; its absence is now reported as the
@@ -139,6 +148,13 @@ answers.
 | Panel < 3.0.0 | no `POST /api/users/{id}/actions/extend` | `subscription_ops` loses per-user extension (only the bulk route remains) |
 | Panel < 3.0.0 | no `/api/system/stats/digest` and `/stats/http` | `panel_activity` loses two of its five reads |
 | Panel < 3.2.0 | no `GET /api/system/configuration` | `platform_probe` only: the `remna.subscriptionRequestHistory` capability stays `unknown` — deliberately, not `false` |
+| Panel < 3.3.0 | no node integrations, shared lists, Host Mapper or GeoCheck | new tools and fields require 3.3+; failures of optional reads are reported separately from the base audit |
+
+`platform_probe` checks `remna.nodeIntegrations` and `remna.sharedLists` against
+their catalogs. An accessible empty catalog is `true`, 404 is `false`, and
+401/403, rate limits or source failures are `unknown` with an explanation.
+The missing `/api/bandwidth-stats/nodes/realtime` handler in 3.3.2 produces
+`realtime_route_absent`; historical traffic remains available.
 
 **Remnawave 3.x is a breaking change for anything written against 2.x, and it
 does not break loudly.** The release removed `uuid` from the user object,
@@ -171,7 +187,7 @@ Remnawave. Both are not required: each is configured separately, and either one
 alone is a complete configuration. Tools belonging to a system you do not have
 are not published at all — they do not answer emptily, they are absent, and
 `platform_probe` says plainly which backends are configured. So the tool count
-depends on the deployment: panel only 16, SHM only 18, both 34 (more in `rw`).
+depends on the deployment: panel only 19, SHM only 18, both 37 (more in `rw`).
 
 ```bash
 pnpm install
@@ -238,7 +254,7 @@ there is more than one of it. A separate application, configured from the same
 # the label is yours (it is what /metrics shows), the token is at least 24
 # characters: openssl rand -hex 24
 HQ_MCP_HTTP_TOKENS='<label>:<token>' pnpm --filter @hq/http start
-# hq-mcp http ready: url=http://127.0.0.1:42480 mode=ro profile=human tools=34 …
+# hq-mcp http ready: url=http://127.0.0.1:42480 mode=ro profile=human tools=37 …
 ```
 
 Without `HQ_MCP_HTTP_TOKENS` it does not start at all, and it refuses before it
@@ -298,7 +314,7 @@ legacy names, is in [COMPATIBILITY.md](COMPATIBILITY.md#fitting).
 
 ## The tools
 
-Thirty-four are visible in `ro`; `rw` adds the fifteen in the last table and
+Thirty-seven are visible in `ro`; `rw` adds the sixteen in the last table and
 takes nothing away. The counts are for the `human` profile; what `bot` sees is in
 the safety model below.
 
@@ -349,10 +365,13 @@ the safety model below.
 | `infra_map` | Nodes × config profiles × inbounds × hosts × squads, and the gaps between them |
 | `infra_costs` | What the infrastructure costs, joined against the panel: a billed node nobody reaches is money going out |
 | `country_health` | Nodes, online users, traffic and hosts for one country |
-| `node_config_audit` | What a profile declares against what the panel would actually hand the node |
+| `node_config_audit` | Declared and computed Xray config, plus separate node integrations and shared-list references |
 | `squads_read` | Both squad families: internal squads decide reach, external ones decide how the subscription is presented |
 | `panel_activity` | What is happening to the panel itself: recap, digest, which routes are hit, subscription request history |
-| `torrent_reports` | Torrent-blocker evidence — and, separately, whether the blocker is even installed and watching |
+| `torrent_reports` | Torrent-blocker evidence, settings and shared-list dependencies |
+| `node_integrations_read` | Integration catalog and ordered node bindings, without configuration values |
+| `shared_lists_read` | Shared-list types and sizes, plugin and node dependencies, missing references |
+| `node_geocheck` | Start a node diagnostic and read its result separately by `job_id`; bounded report without SVG or raw data |
 
 **Behind a tunnel** (these two refuse without one, with the exact ssh command)
 
@@ -368,9 +387,10 @@ the safety model below.
 | `billing_adjust` | An SHM client's balance or bonuses |
 | `billing_refund_service` | Refunds a service to the balance, for the sum SHM recorded as withdrawn for the current paid period |
 | `bulk_ops` | Bulk operations over panel clients — by a named id set, or fleet-wide |
-| `host_edit` | One Remnawave host: remark, address, port, SNI/host/path/ALPN/fingerprint, security layer, tags, enable/hide |
-| `host_cleanup` | Deletes hosts by an explicit uuid list. Irreversible |
-| `node_manage` | One node: enable, disable, restart, reset_traffic, update, create |
+| `host_edit` | One Remnawave host: remark, address, port, SNI/host/path/ALPN/fingerprint, security layer, tags, enable/hide, and Host Mapper with a local backup |
+| `host_cleanup` | Deletes hosts by an explicit uuid list; complete hosts are kept in a private backup for manual recreation. No automatic rollback |
+| `node_manage` | One node: enable, disable, restart, reset_traffic, update, create; ordered `integration_uuids` in create/update |
+| `panel_sync` | Sends a plugin or shared list to eligible connected nodes; confirmation means queue acceptance |
 | `subscription_ops` | One panel subscription: enable, disable, extend, reset_traffic, revoke, set_limits, device removal |
 | `service_lifecycle` | A client's service: give, touch, change_plan, schedule_change, stop, activate, delete |
 | `provisioning_repair` | Retry, resume or pause one stuck spool task |
@@ -443,6 +463,13 @@ substrings with no key name to redact, so they must never travel back to the
 model inside `before`/`rollback` — and a rollback has to outlive a shift, while
 plan snapshots are swept within the hour.
 
+`host_edit` with `mapper` uses the same private backup directory; mapper values
+remain in the backup and `restore_from` builds a confirmed restoration plan.
+`host_cleanup` saves complete hosts, including mapper, and exposes `backupRef`
+with its path and hash. It verifies backup integrity and current host contents
+before deleting. This backup is for manual recreation; deleted hosts have no
+automatic rollback.
+
 Two more things the writers refuse to do. A body carrying `<redacted:…>` markers
 is never written back: that is the output of a read tool, and writing it would
 replace a live credential with the word that hid it. And raw panel blobs
@@ -455,11 +482,10 @@ Hysteria2 password inside `finalMask`.
 `host_edit` is the only mutator whose **apply** branch has been run against a
 working system: a host's remark was changed on a running Remnawave 3.2.3 panel,
 then verified — the password in `finalMask` had survived, nothing beyond the
-declared field had moved — and rolled back. Every other mutator is proven **as
-far as the plan**: the plan is built against data read out of running systems and
-the applier is covered by tests, but its apply branch has never run against a
-working system.
-Read that as it is written. A plan that looks right is evidence about the plan.
+declared field had moved — and rolled back. That check covers a remark edit on
+3.2.3. New mapper edits, integration bindings, sync and deleted-host backups in
+the 3.3.2 update are covered by local tests; this migration made no writes to a
+live panel.
 
 ## Safety model
 

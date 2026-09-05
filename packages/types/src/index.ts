@@ -69,6 +69,8 @@ export type Capability =
    */
   | 'remna.subscriptionRequestHistory'
   | 'remna.realtimeBandwidth'
+  | 'remna.nodeIntegrations'
+  | 'remna.sharedLists'
   | 'tunnel.mysql'
   | 'tunnel.postgres'
   | 'tunnel.abuse';
@@ -80,6 +82,8 @@ export const CAPABILITIES: readonly Capability[] = [
   'shm.dry_run',
   'remna.subscriptionRequestHistory',
   'remna.realtimeBandwidth',
+  'remna.nodeIntegrations',
+  'remna.sharedLists',
   'tunnel.mysql',
   'tunnel.postgres',
   'tunnel.abuse',

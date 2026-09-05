@@ -14,8 +14,9 @@ decide whether the project fits — the version floors and what breaks below the
 are in the READMEs themselves. This one is for auditing routes and names against
 a specific installation.
 
-Минимумы · Floors: **SHM 2.18.0**, **Remnawave 3.0.0**.
+Минимумы базовых инструментов · Base-tool floors: **SHM 2.18.0**, **Remnawave 3.0.0**.
 Проверено на · Verified against: **SHM 2.19.4**, **Remnawave 3.2.3**.
+Новые возможности · New features: **Remnawave 3.3.2**, см. · see [below](#remna-332).
 
 <a id="shm-routes"></a>
 
@@ -106,7 +107,7 @@ is recognised.
 | `GET /api/hwid/devices/stats` | 2.1.13 | `device_inventory` |
 | `GET /api/hwid/devices/top-users` | 2.3.2 | `device_inventory`, `abuse_report` |
 | `POST /api/hwid/devices/delete-all` | 2.1.12 | `subscription_ops` |
-| `GET /api/connections/by-user/{id}` · `/by-node/{uuid}` | 3.0.0 | `connections_inspect` |
+| `POST /api/connections/by-user/{id}` · `/by-node/{uuid}`, `GET /api/connections/by-user/{jobId}` · `/by-node/{jobId}` | 3.0.0 | `connections_inspect` |
 | `GET /api/nodes` · `POST`/`PATCH` · `actions/{enable,disable,restart,reset-traffic}` | 1.3.3 (reset-traffic 1.6.0) | `country_health`, `infra_map`, `node_manage` |
 | `GET /api/nodes/tags` | 1.6.0 | `node_config_audit` |
 | `GET /api/hosts` · `PATCH` · `DELETE /{uuid}` | 1.3.3 | `country_health`, `infra_map`, `host_edit`, `host_cleanup` |
@@ -114,13 +115,19 @@ is recognised.
 | `GET /api/config-profiles/{uuid}/computed-config` | 2.2.4 | `node_config_audit` |
 | `GET /api/internal-squads` · `/{uuid}/accessible-nodes` | 2.0.0 | `squads_read`, `infra_map`, `traffic_stats` |
 | `GET /api/external-squads` | 2.2.0 | `squads_read` |
-| `GET /api/bandwidth-stats/nodes` · `/nodes/realtime` · `/internal-squads/{uuid}/usage` · `/users/{id}` | 2.0.0 (realtime 1.5.2) | `country_health`, `traffic_stats`, `platform_probe` |
+| `GET /api/bandwidth-stats/nodes` · `/internal-squads/{uuid}/usage` · `/users/{id}` | 2.0.0 | `country_health`, `traffic_stats` |
+| `GET /api/bandwidth-stats/nodes/realtime` | константа, обработчика в 3.3.2 нет · constant only, no 3.3.2 handler | `platform_probe`: 404 → `realtime_route_absent` |
 | `GET /api/bandwidth-stats/nodes/{uuid}/users` | 2.8.0 | `traffic_stats` |
 | `GET /api/node-plugins` · `/{uuid}` · `/torrent-blocker` · `/torrent-blocker/stats` | 2.7.0 | `node_config_audit`, `torrent_reports` |
 | `GET /api/infra-billing/providers` · `/nodes` · `/history` | 2.0.0 | `infra_costs` |
 | `GET /api/subscription-page-configs` · `/{id}` | 2.4.0 | `subpage_read` |
 | `GET /api/snippets` | 2.2.0 | `subpage_read` |
 | `GET /api/subscription-request-history` · `/stats` | 2.1.14 | `panel_activity` |
+| `GET /api/node-integrations` · `/{uuid}` | 3.3.0 | `node_integrations_read`, `node_config_audit`, `node_manage`, `platform_probe` |
+| `GET /api/node-plugins/shared-lists` · `/{name}` | 3.3.0 | `shared_lists_read`, `node_config_audit`, `torrent_reports`, `panel_sync`, `platform_probe` |
+| `POST /api/node-plugins/actions/sync` | 3.3.0 | `panel_sync`, `{uuid}`, 202 |
+| `POST /api/node-plugins/shared-lists/actions/sync` | 3.3.0 | `panel_sync`, `{name}`, 202 |
+| `POST /api/connections/geocheck/{nodeUuid}` · `GET /api/connections/geocheck/{jobId}` | 3.3.0 | `node_geocheck` |
 
 Маршрутов, снесённых в 3.0.0 (`by-telegram-id`, `by-email`, `by-tag`, `by-id`,
 `by-subscription-uuid`), здесь нет ни одного: они заменены на `/api/users/stream`
@@ -135,11 +142,11 @@ instead of 404.
 
 ## Самые молодые маршруты панели ниже 3.0.0 · The youngest panel routes below the 3.0.0 line
 
-Всё остальное, что зовут инструменты, живёт в SHM с 1.x, а в панели — с 2.x и
-раньше.
+Эти маршруты базовой группы живут в панели с 2.x и раньше. Дополнения 3.3
+перечислены отдельно ниже.
 
-Everything else these tools call has been in SHM since 1.x and in the panel
-since 2.x or earlier.
+These base-group routes have been in the panel since 2.x or earlier. The 3.3
+extensions are listed separately below.
 
 | Маршрут · Route | С версии · Since | Кто зовёт · Called by |
 |---|---|---|
@@ -150,6 +157,73 @@ since 2.x or earlier.
 | `/api/subscription-page-configs` | 2.4.0 | `subpage_read` |
 | `/api/hwid/devices/top-users` | 2.3.2 | `abuse_report` |
 | `/api/snippets` · `/api/external-squads` | 2.2.0 | `subpage_read`, `squads_read` |
+
+<a id="remna-332"></a>
+
+## Remnawave 3.3.2
+
+Контракты сверены с исходниками [3.3.2](https://github.com/remnawave/backend/tree/3.3.2).
+Новые возможности появились в [3.3.0](https://github.com/remnawave/backend/releases/tag/3.3.0).
+В [3.3.1](https://github.com/remnawave/backend/releases/tag/3.3.1) добавлен
+`rulePlacement`, а [3.3.2](https://github.com/remnawave/backend/releases/tag/3.3.2)
+убрала его неявное значение `0`. Отсутствующее поле в диагностике остаётся
+неизвестным; оно не подменяется нулём.
+
+| Возможность · Feature | Поведение MCP · MCP behavior |
+|---|---|
+| Host Mapper | `host_edit` принимает `mapper` с `xrayJson`, `mihomo`, `base64`, `singbox` и операциями copy/set/unset. Без поля PATCH сохраняет текущий mapper. Содержимое хранится в локальной резервной копии; план показывает сводку и hash. · Accepts these four formats and operations, preserves an omitted mapper, stores content in a local backup and exposes only its summary/hash. |
+| Host cleanup | Полный снимок удаляемых хостов, включая mapper, хранится в закрытой копии; `backupRef` указывает путь и hash. До удаления сверяются копия и текущие хосты. · Full hosts including mapper live in a private backup, with a public `backupRef` path/hash; backup and current hosts are verified before deletion. |
+| Node integrations | `node_manage` принимает до 20 `integration_uuids` в заданном порядке. Поздняя интеграция перекрывает раннюю на верхнем уровне. Изменение привязок перезапускает включённую ноду. Интеграции идут отдельно от Xray-конфига. · Up to 20 ordered bindings, later top-level values win; an explicit binding update restarts an enabled node. Integrations travel separately from Xray config. |
+| Shared lists | Имена API не содержат `ext:`, ссылки плагинов имеют вид `ext:name`. Превью содержит тип и число элементов; значения не возвращаются. Обрыв чтения означает неизвестные зависимости. · API names omit `ext:`, plugin references use it; summaries expose types/counts, incomplete reads leave dependencies unknown. |
+| GeoCheck | `node_geocheck` доступен только human в `ro`. `start` делает POST и сразу возвращает `job_id`; `result` делает один GET. Завершённая задача может содержать `success: false`. · Human-only read-scope diagnostic; start returns immediately, result polls once, queue completion does not imply node success. |
+| Sync | `panel_sync` доступен только human в `rw`, через план и подтверждение. План фиксирует подходящие ноды и содержимое источников; изменения до подтверждения требуют нового плана. Ответ 202 означает очередь. · Human-only confirmed mutation with source/membership guards; 202 means queued. |
+
+Синхронизация выбирает ноды с подходящим `activePluginUuid`, для которых
+`isDisabled=false`, `isConnected=true`, `isConnecting=false`. После подтверждения
+общий конверт имеет `status: "applied"` (вызов выполнен), но вложенный результат
+явно содержит `status: "queued"`, `accepted: true`, `completed: false`.
+Фактическое применение на нодах этим ответом не подтверждается.
+
+Sync eligibility requires a matching `activePluginUuid` and
+`isDisabled=false`, `isConnected=true`, `isConnecting=false`. The confirmation
+envelope uses `status: "applied"` for the executed request; its nested result is
+explicitly `status: "queued"`, `accepted: true`, `completed: false`. It does not
+claim the nodes have already applied the configuration.
+
+```text
+node_integrations_read {}
+shared_lists_read {"name":"allowed_networks"}
+node_geocheck {"action":"start","node_uuid":"00000000-0000-4000-8000-000000000001"}
+node_geocheck {"action":"result","job_id":"returned-job-id"}
+panel_sync {"target":"shared_list","name":"allowed_networks"}
+ops_confirm {"plan_id":"returned-plan-id"}
+```
+
+Права чтения новых каталогов: `node-integrations:list/get` и
+`node-plugins:shared-lists-list/shared-lists-get`. GeoCheck использует read-scopes
+`connections:geocheck` и `connections:geocheck-result`. Синхронизация требует
+`node-plugins:sync` или `node-plugins:shared-lists-sync`, а также чтения источников
+для плана. 403 не доказывает отсутствие возможности: проверьте права токена.
+
+New catalog reads use `node-integrations:list/get` and
+`node-plugins:shared-lists-list/shared-lists-get`. GeoCheck uses the read scopes
+`connections:geocheck` and `connections:geocheck-result`. Sync requires
+`node-plugins:sync` or `node-plugins:shared-lists-sync` plus source reads for its
+plan. A 403 leaves capability availability unknown: check token permissions.
+
+На живой панели 3.3.2 проверены `platform_probe`, `node_integrations_read`,
+`shared_lists_read`, `node_config_audit`, `torrent_reports`, `infra_map`.
+Каталоги интеграций и общих списков были доступны и пусты. Заполненные каталоги,
+новые записи, восстановление mapper и конфликты между планом и подтверждением
+проверяются локальными тестами с ответами API. Проверка совместимости не
+выполняет записи или задания GeoCheck на живой панели.
+
+`platform_probe`, `node_integrations_read`, `shared_lists_read`, `node_config_audit`,
+`torrent_reports` and `infra_map` were checked against a live 3.3.2 panel. Its
+integration and shared-list catalogs were accessible and empty. Populated
+catalogs, new writes, mapper restoration and plan/confirmation conflicts are
+tested with local API fixtures. Compatibility checks do not write to a live panel
+or start live GeoCheck jobs.
 
 <a id="fork"></a>
 

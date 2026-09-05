@@ -1,5 +1,7 @@
-import { readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { createSourceFile, forEachChild, isCallExpression, isIdentifier, ScriptTarget } from 'typescript';
+import type { Node } from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { createReadTools } from './index.js';
 
@@ -22,7 +24,15 @@ function toolModules(dir: string): string[] {
       !path.endsWith('index.ts') &&
       !infrastructure.some((name) => path.endsWith(name))
     ) {
-      out.push(path);
+      // Count actual tool declarations; helper modules and comments are not tools.
+      const source = createSourceFile(path, readFileSync(path, 'utf8'), ScriptTarget.Latest, true);
+      const visit = (node: Node): void => {
+        if (isCallExpression(node) && isIdentifier(node.expression) && node.expression.text === 'defineTool') {
+          out.push(path);
+        }
+        forEachChild(node, visit);
+      };
+      visit(source);
     }
   }
   return out;
