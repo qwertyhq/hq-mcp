@@ -9,7 +9,6 @@ import {
   clientExists,
   emailOfAccounts,
   firstRow,
-  identitySchemaOfRow,
   lookupAccountsFor,
   num,
   settle,
@@ -155,43 +154,62 @@ export const clientAccountState = defineTool({
      */
     const adminRecord = asRecord(presence.row);
     /**
-     * АДМИНСКАЯ ПОЛОВИНА АДРЕСА ПЕРЕЕХАЛА, И БЕЗ ЭТОЙ ВЕТКИ СРАВНЕНИЕ ИСЧЕЗАЕТ
-     * МОЛЧА.
+     * АДМИНСКАЯ ПОЛОВИНА АДРЕСА ПЕРЕЕХАЛА, И СПРАШИВАТЬ, КУДА, НАДО У САМОЙ SHM.
      *
      * До 3.0 она лежит в `users.login2` — той же колонке, куда
-     * телеграм-регистрация пишет `@<id>`. С 3.0 колонки нет в
-     * `Core::User::structure` вовсе, то есть `adminRecord.login2` —
-     * `undefined`, `onAdminRecord` — `null`, и предупреждение о расхождении
-     * двух источников не срабатывает НИКОГДА. Выглядит это как «расхождений
-     * нет», хотя на самом деле сравнивать перестали.
+     * телеграм-регистрация пишет `@<id>`. С 3.0 она в `accounts`, а `login2`
+     * остаётся в базе мёртвым остатком: миграция колонку не дропает (снимок
+     * схемы боевой 3.1.0), а `/admin/user` отдаёт физические колонки целиком
+     * (`fields => '*'`, Sql/Data.pm:906). То есть по строке эти две схемы
+     * НЕОТЛИЧИМЫ — прежняя проба «есть ключ login2 → старая схема» отвечала
+     * «старая» на 3.1.0 каждому клиенту и в `accounts` не ходила никогда.
      *
-     * Поэтому на 3.0 вторая сторона берётся оттуда, куда она переехала: из
-     * строк `accounts` этого клиента. Запрос уходит ТОЛЬКО когда `login2` в
-     * строке нет — на 2.19 всё остаётся ровно как было, без лишнего вызова.
+     * Поэтому схема спрашивается у SHM всегда, одним запросом (на установке до
+     * 3.0 он 404-ится и вердикт кэшируется, см. @hq/shm/identity).
      */
-    const legacyAdminEmail = str(adminRecord.login2 ?? adminRecord.email);
-    let adminEmail = legacyAdminEmail;
-    let adminEmailFrom: 'login2' | 'accounts' | null = legacyAdminEmail === null ? null : 'login2';
-    let identitySchema: IdentitySchema = identitySchemaOfRow(adminRecord);
-    if (identitySchema !== 'legacy') {
-      const accounts = await settle(lookupAccountsFor(ctx, { user_id: shm_user_id }));
-      if (accounts.ok) {
-        identitySchema = accounts.value.schema;
-        if (accounts.value.error !== null) degraded.push({ system: 'shm', error: accounts.value.error });
-        const fromAccounts = emailOfAccounts(accounts.value.accounts);
-        if (fromAccounts !== null) {
-          adminEmail = fromAccounts;
-          adminEmailFrom = 'accounts';
-        }
-      } else {
-        degraded.push({ system: 'shm', error: accounts.error });
-      }
+    const accounts = await settle(lookupAccountsFor(ctx, { user_id: shm_user_id }));
+    let identitySchema: IdentitySchema = 'unknown';
+    let fromAccounts: string | null = null;
+    if (accounts.ok) {
+      identitySchema = accounts.value.schema;
+      if (accounts.value.error !== null) degraded.push({ system: 'shm', error: accounts.value.error });
+      fromAccounts = emailOfAccounts(accounts.value.accounts);
+    } else {
+      degraded.push({ system: 'shm', error: accounts.error });
     }
-    const address = str(emailRow.email);
+
+    /**
+     * НА НОВОЙ СХЕМЕ `login2` НЕ ЧИТАЕТСЯ ВОВСЕ — ДАЖЕ КАК ЗАПАСНОЙ ВАРИАНТ.
+     *
+     * Это не осторожность, а разница между «адреса в админской половине нет» и
+     * «там лежит то, что было до переезда». Живой пример с прода: у клиента
+     * в `login2` остался телеграм-хендл `@123456`, и подставленный сюда
+     * он давал расхождение с клиентским маршрутом — то есть предупреждение
+     * `email_admin_record_differs` про несуществующий конфликт.
+     */
+    const legacyAdminEmail =
+      identitySchema === 'accounts' ? null : str(adminRecord.login2 ?? adminRecord.email);
+    const adminEmail = fromAccounts ?? legacyAdminEmail;
+    const adminEmailFrom: 'login2' | 'accounts' | null =
+      fromAccounts !== null ? 'accounts' : legacyAdminEmail === null ? null : 'login2';
+    /**
+     * `is_primary` СТАВИТСЯ СРАВНЕНИЕМ С `users.login`, А НЕ ПРИЗНАКОМ АДРЕСА.
+     *
+     * `Core::User::get_emails` (prod User.pm:519-533) считает адрес основным,
+     * когда он совпадает с логином клиента, и сортирует такие вперёд. У этой
+     * установки логин почти всегда телеграмный — значит НИ ОДИН адрес не
+     * основной, порядок задаёт выдача базы, и «первый = основной» превращается
+     * в «первый попавшийся». Поэтому основным здесь зовётся только тот, у кого
+     * флаг действительно стоит; иначе адрес берётся первым, но об этом
+     * говорится вслух (`email_primary_unset`).
+     */
+    const primaryRow = emailRows.find((row) => flag(row.is_primary) === true);
+    const address = str((primaryRow ?? emailRow).email);
+    const verifiedRow = primaryRow ?? emailRow;
     const email = emailRes.ok
       ? {
           address,
-          verified: flag(emailRow.email_verified) ?? false,
+          verified: flag(verifiedRow.email_verified) ?? false,
           /** Все адреса, которые маршрут вернул: с 3.0 их бывает несколько. */
           allAddresses: emailRows.map((row) => str(row.email)).filter((one) => one !== null),
           /** Адрес в админской половине: `users.login2` до 3.0, `accounts` с 3.0. */
@@ -206,13 +224,27 @@ export const clientAccountState = defineTool({
         }
       : null;
 
+    if (emailRes.ok && emailRows.length > 1 && primaryRow === undefined) {
+      warnings.push(
+        warn(
+          'email_primary_unset',
+          `This client has ${String(emailRows.length)} email addresses and NONE of them is the ` +
+            'primary one: SHM calls an address primary when it equals `users.login` ' +
+            '(Core::User::get_emails), and this login is not an email address at all. So the ' +
+            'order the route returned carries no meaning, `address` is simply the first row, and ' +
+            'picking it as "the client\'s email" is a guess. Ask the client which one they read.',
+        ),
+      );
+    }
+
     if (emailRes.ok && emailRows.length > 1) {
       warnings.push(
         warn(
           'email_several_on_file',
           `This client has ${String(emailRows.length)} email addresses on file, not one — from ` +
             'SHM 3.0 they are rows of the `accounts` table and a client may hold several. ' +
-            '`address` is the primary one (the route sorts it first); the rest are in ' +
+            '`address` is the one SHM marks primary, or — when none is marked, see ' +
+            '`email_primary_unset` — simply the first row; the rest are in ' +
             '`allAddresses`. Answering "the client\'s email is X" from `address` alone is how a ' +
             'password reset goes to the address they stopped reading.',
         ),
@@ -377,6 +409,11 @@ export const clientAccountState = defineTool({
        * (`users.login2`), `accounts` — в отдельной таблице (3.0+), `unknown` —
        * установить не удалось. Отдаётся наружу потому, что от этого зависит,
        * чему равно `email.onAdminRecord`, когда оно `null`.
+       *
+       * На `unknown` `onAdminRecordFrom: 'login2'` читать как факт нельзя: в
+       * этой колонке на 3.0+ лежит то, что было ДО переезда, и отличить её
+       * живое значение от остатка можно только по схеме, которую установить
+       * как раз и не вышло.
        */
       identitySchema,
       email,

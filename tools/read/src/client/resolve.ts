@@ -45,8 +45,10 @@ export interface ShmUserMatch {
   email_from: 'login2' | 'accounts' | null;
   /**
    * Телефоны. До 3.0 — одна колонка `users.phone`, с 3.0 — строки `accounts`
-   * с `type='phone'`, которых может быть несколько. Пустой массив — не
-   * доказательство отсутствия на 3.0 по той же причине, что и почта.
+   * с `type='phone'`, которых может быть несколько. В отличие от почты, на
+   * 3.0 они В СТРОКЕ ЕСТЬ: `Core::User::list_for_api` дописывает поле `phone`
+   * сам, склеивая номера клиента из `accounts` через запятую (prod
+   * User.pm:1249-1254). Здесь склейка разобрана обратно в список.
    */
   phones: string[];
   /**
@@ -249,26 +251,62 @@ const SERVICE_PATH_BLIND_SPOT =
   'behind by a removed service is invisible to this path';
 
 /**
+ * ПОХОЖЕ ЛИ ЗНАЧЕНИЕ НА ПОЧТОВЫЙ АДРЕС ВООБЩЕ.
+ *
+ * Колонка `users.login2` — не поле «email»: телеграм-регистрация SHM пишет
+ * туда `@<telegram id>` (миграция 2.8.0.sql:2 заполняет её этим же), и такая
+ * строка, подставленная в поле `email`, уезжает оператору как почта клиента.
+ * Живой случай с прода: клиент отдавался как
+ * `{"login":"client@example.com","email":"@123456"}` — адрес и «почта» разные,
+ * причём «почтой» назван телеграм-хендл.
+ *
+ * Проверка нарочно грубая: задача — отсечь заведомо не-адрес, а не
+ * валидировать почту (этим занимается SHM при привязке).
+ */
+function emailShaped(value: string | null): string | null {
+  if (value === null) return null;
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value) ? value : null;
+}
+
+/**
  * Строка SHM разнородна: settings то объект, то JSON-строка.
  *
- * ПОЧТА ЧИТАЕТСЯ ИЗ `login2` — и это верно ТОЛЬКО до SHM 3.0. С 3.0 колонки
- * `login2` нет в `Core::User::structure` вовсе, `users.phone` дропнута
- * миграцией 3.0.38, а `users.settings.email` вычищена миграцией 3.0.0: всё
- * это переехало в таблицу `accounts`. Здесь остаётся ровно старый путь,
- * потому что он бесплатен (поля уже в строке), а новый стоит отдельного
- * запроса и добирается `applyAccounts` ниже — по клиентам, до которых дошёл
- * потолок обхода.
+ * ПОЧТА ЧИТАЕТСЯ ИЗ `login2` — и это верно ТОЛЬКО до SHM 3.0, поэтому
+ * `schema` здесь аргумент, а не догадка. С 3.0 адрес, телефон и привязка
+ * телеграма переехали в таблицу `accounts`, а `login2` осталась в базе
+ * ФИЗИЧЕСКИ (миграция её не дропает) с довоенными значениями внутри, и
+ * `/admin/user` отдаёт её как ни в чём не бывало: `fields => '*'` по
+ * умолчанию, Sql/Data.pm:906. Прочитанная на 3.0 как почта, она даёт не
+ * пустоту, а УСТАРЕВШИЙ или вовсе чужой по смыслу ответ — что хуже пустоты,
+ * потому что выглядит как данные.
+ *
+ * Поэтому: `accounts` — колонка не читается совсем (адрес доберёт
+ * `applyAccounts` из `accounts`), `legacy` — читается как прежде,
+ * `unknown` — читается, но только если значение вообще похоже на адрес.
  */
-export function normalizeShmUser(row: Record<string, unknown>): ShmUserMatch {
+export function normalizeShmUser(
+  row: Record<string, unknown>,
+  schema: IdentitySchema = 'unknown',
+): ShmUserMatch {
   const balance = num(row.balance, Number.NaN);
-  const email = str(row.login2 ?? row.email);
-  const phone = str(row.phone);
+  const email =
+    schema === 'accounts' ? null : emailShaped(str(row.login2 ?? row.email));
+  /**
+   * `phone` в строке есть на ОБЕИХ схемах, но на 3.0 это уже не колонка:
+   * `Core::User::list_for_api` дописывает поле сам, складывая номера клиента
+   * из `accounts` через запятую (prod User.pm:1249-1254, get_phone:1332-1337).
+   * Целиком такая склейка — не телефон, и звонить по ней нельзя.
+   */
+  const phones = (str(row.phone) ?? '')
+    .split(',')
+    .map((one) => one.trim())
+    .filter((one) => one !== '');
   return {
     user_id: num(row.user_id ?? row.id, 0),
     login: str(row.login),
     email,
     email_from: email === null ? null : 'login2',
-    phones: phone === null ? [] : [phone],
+    phones,
     accounts: null,
     full_name: str(row.full_name),
     telegram_id: telegramIdOf(row),
@@ -592,7 +630,9 @@ export const clientResolve = defineTool({
     const ranked = byExactness(
       rows
         .map(asRecord)
-        .map(normalizeShmUser)
+        // Схема установлена выше ОДНИМ запросом и передаётся внутрь: без неё
+        // нормализация читает мёртвую `login2` как почту клиента.
+        .map((row) => normalizeShmUser(row, schema))
         .filter((match) => {
           if (match.user_id > 0 && seen.has(match.user_id)) return false;
           if (match.user_id > 0) seen.add(match.user_id);
@@ -610,9 +650,10 @@ export const clientResolve = defineTool({
      * Ранжирование идёт ДО этого шага намеренно: обходить имеет смысл тех, кто
      * уже признан похожим на ответ, а не первых попавшихся из подстрочного
      * окна. Строки, до которых потолок не дошёл, уезжают с `accounts: null` и
-     * прежней почтой из `login2` — на 3.0 это `null`, и `email_from: null`
-     * говорит ровно это: «ни в одном известном месте не нашлось», а не «почты
-     * у клиента нет».
+     * `email: null` — на 3.0 строка клиента адреса не несёт, а мёртвая
+     * `login2` не читается по решению выше. `email_from: null` говорит ровно
+     * это: «ни в одном известном месте не нашлось», а не «почты у клиента
+     * нет».
      */
     const enrichable = schema === 'accounts' ? ranked.slice(0, IDENTITY_ENRICH_BUDGET) : [];
     const enriched = new Map<number, ShmAccount[]>();
@@ -656,8 +697,9 @@ export const clientResolve = defineTool({
           'This server could not establish where this SHM keeps client identity: ' +
             'GET /admin/user/accounts neither answered nor returned the router 404 that means ' +
             '"older than 3.0". Emails, phones and telegram bindings below come from the client ' +
-            'row alone (users.login2), which is empty on 3.0 — so a null email here proves ' +
-            'nothing either way. See `degraded`.',
+            'row alone — from `users.login2`, which on 3.0+ still exists in the table but holds ' +
+            'whatever was there BEFORE the migration. So an email here may be stale and a null ' +
+            'one proves nothing either way. See `degraded`.',
         ),
       );
     }

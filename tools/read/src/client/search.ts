@@ -1,14 +1,32 @@
 import { defineTool } from '@hq/registry';
 import { z } from 'zod';
 import type { Degraded, ToolWarning } from '@hq/types';
-import { EMPTY_LIST, capLimit, listOut, settle, take, warn } from '../kit.js';
+import { EMPTY_LIST, capLimit, listOut, lookupAccountsFor, settle, take, warn } from '../kit.js';
+import type { IdentitySchema } from '../kit.js';
 import { normalizeShmUser } from './resolve.js';
 import type { ShmUserMatch } from './resolve.js';
 
 const MAX_LIMIT = 200;
 
-function matchesText(row: ShmUserMatch, needle: string): boolean {
-  const hay = [row.login, row.email, row.full_name, String(row.user_id), String(row.telegram_id)]
+/**
+ * Совпадение ищется и по СЫРОЙ строке тоже, а не только по напечатанным полям.
+ *
+ * С 3.0 почта клиента в строке не живёт, и `normalizeShmUser` на такой
+ * установке её оттуда не берёт (`users.login2` там мёртвый остаток с
+ * довоенными значениями). Но искать по ней всё ещё осмысленно: оператор,
+ * который ввёл старый адрес, ищет человека, а не подтверждает адрес. Поэтому
+ * колонка участвует в ОТБОРЕ и не участвует в ОТВЕТЕ.
+ */
+function matchesText(row: ShmUserMatch, needle: string, raw?: Record<string, unknown>): boolean {
+  const legacy = raw === undefined ? null : raw.login2;
+  const hay = [
+    row.login,
+    row.email,
+    row.full_name,
+    String(row.user_id),
+    String(row.telegram_id),
+    typeof legacy === 'string' ? legacy : null,
+  ]
     .filter((value): value is string => value !== null)
     .join(' ')
     .toLowerCase();
@@ -85,9 +103,55 @@ export const clientSearch = defineTool({
     // и её нельзя терять; если сама SHM обрезала выдачу лимитом, "truncated"
     // предупреждение об этом скажет прямо.
     const primaryOut = listOut(take(primary, 'shm', degraded, EMPTY_LIST), warnings, 'client_search');
+
+    /**
+     * ГДЕ У ЭТОЙ SHM ЛЕЖИТ ПОЧТА — СПРАШИВАЕТСЯ ОДИН РАЗ НА ВЕСЬ ПОИСК.
+     *
+     * С 3.0 адрес переехал в таблицу `accounts`, а колонка `users.login2`
+     * осталась в базе физически, с тем, что было записано ДО переезда:
+     * миграция её не дропает, а `/admin/user` отдаёт физические колонки
+     * целиком (`fields => '*'`, Sql/Data.pm:906). Напечатанная как `email`,
+     * она даёт устаревший адрес, а на телеграм-регистрации — хендл `@<id>`.
+     *
+     * Запрос ОДИН и обязательно сужённый (голый список `accounts` — это
+     * выгрузка почт и телефонов всей базы), поэтому он идёт по первому
+     * найденному клиенту: схема у базы одна на всех. Добирать сами адреса
+     * здесь нельзя — это был бы запрос на КАЖДУЮ строку выдачи; для одного
+     * клиента их читают client_resolve и client_account_state.
+     */
+    const probeId = primaryOut.data
+      .map((row) => normalizeShmUser(row).user_id)
+      .find((id) => id > 0);
+    let schema: IdentitySchema = 'unknown';
+    if (probeId !== undefined) {
+      const identity = await settle(lookupAccountsFor(ctx, { user_id: probeId }));
+      if (identity.ok) {
+        schema = identity.value.schema;
+        if (identity.value.error !== null) degraded.push({ system: 'shm', error: identity.value.error });
+      } else {
+        degraded.push({ system: 'shm', error: identity.error });
+      }
+    }
+
     const byId = new Map<number, ShmUserMatch>();
-    for (const row of primaryOut.data.map(normalizeShmUser)) {
+    for (const row of primaryOut.data.map((one) => normalizeShmUser(one, schema))) {
       byId.set(row.user_id, row);
+    }
+
+    if (schema === 'accounts') {
+      warnings.push(
+        warn(
+          'identity_not_in_row',
+          'From SHM 3.0 the email of a client is a row of the `accounts` table, not a column of ' +
+            'the client row this search returns, and filling it in would cost one request per ' +
+            'result — so `email` is null here for everyone. That is "not in this answer", never ' +
+            '"the client has no email". The dead `users.login2` column does still arrive and ' +
+            'still holds pre-migration values, which is why it is searched but never printed as ' +
+            'an email. `phones` is unaffected: SHM itself joins the accounts rows into the row ' +
+            'it returns. For an address, resolve one client at a time (client_resolve, ' +
+            'client_account_state).',
+        ),
+      );
     }
 
     let items = primaryOut.items;
@@ -149,8 +213,10 @@ export const clientSearch = defineTool({
       // маршрута запроса: когда filter={"block":1} не сужает выборку (а именно
       // это и проверяется ниже), «список заблокированных» состоит из обычных
       // клиентов, и каждый из них уезжал бы помеченным как заблокированный.
-      const blockedPage = blockedOut.data.map(normalizeShmUser);
-      const blockedRows = blockedPage.filter((row) => matchesText(row, text));
+      const blockedPage = blockedOut.data.map((one) => normalizeShmUser(one, schema));
+      const blockedRows = blockedPage.filter((row, index) =>
+        matchesText(row, text, blockedOut.data[index]),
+      );
       for (const row of blockedRows) {
         if (!byId.has(row.user_id)) items += 1;
         byId.set(row.user_id, row);

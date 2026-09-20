@@ -392,6 +392,23 @@ describe('notify_history: narrowing, and whether it was honoured', () => {
     expect(call?.params?.user_id).toBeUndefined();
   });
 
+  /**
+   * SKIPPED — НАСТОЯЩИЙ СТАТУС ЗАДАЧИ, А НЕ ОПЕЧАТКА ВЫЗЫВАЮЩЕГО.
+   *
+   * Он появился в 3.0 (Core::Const) и на боевой 3.1.0 лежит в истории живьём.
+   * Прежний enum знал шесть статусов, и фильтр по седьмому отвечал
+   * invalid_input — то есть инструмент, обещавший «весь словарь», отказывался
+   * искать то, что сам же и показывает в выдаче.
+   */
+  it('narrows by SKIPPED — a status the queue really emits since 3.0', () => {
+    for (const status of ['SKIPPED', 'DELETED']) {
+      expect(() =>
+        notifyHistory.input.parse({ shm_user_id: USER, status, limit: 50 }),
+      ).not.toThrow();
+    }
+    expect(() => notifyHistory.input.parse({ status: 'PROCESSING' })).toThrow();
+  });
+
   it('sends no filter at all when nothing was asked for', async () => {
     const calls: StubCall[] = [];
     const ctx = makeCtx({ shmList: stub([DELIVERED]), calls });

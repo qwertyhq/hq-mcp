@@ -556,10 +556,20 @@ describe('client_resolve — real Remnawave 404 vs 500 on the by-username lookup
  * работает на 2.19» — это не готовность к переезду, а перенос поломки.
  */
 describe('client_resolve × identity schema (SHM 2.19 vs 3.0)', () => {
-  /** Строка клиента, какой её отдаёт 3.0: без login2, без phone. */
+  /**
+   * Строка клиента, какой её отдаёт БОЕВАЯ 3.1.0.
+   *
+   * `login2` здесь НЕ случайно: миграция колонку не дропает (снимок схемы
+   * прода), а `/admin/user` выбирает физические колонки целиком
+   * (`fields => '*'`, Sql/Data.pm:906) — то есть довоенное значение приезжает
+   * в каждом ответе. Живой случай: там лежит телеграм-хендл, а не почта.
+   * Прежняя фикстура его не несла, и весь блок проверял установку, которой
+   * не существует.
+   */
   const row30 = {
     user_id: 4100,
     login: 'tg900002',
+    login2: '@900002',
     full_name: 'Petr',
     balance: '10.00',
     block: 0,
@@ -737,6 +747,31 @@ describe('client_resolve × identity schema (SHM 2.19 vs 3.0)', () => {
     expect(result.identity.schema).toBe('unknown');
     expect(result.warnings.map((w) => w.code)).toContain('identity_schema_unknown');
     expect(result.degraded.some((one) => one.system === 'shm')).toBe(true);
+  });
+
+  /**
+   * РЕГРЕССИЯ НА ГЛАВНУЮ ПОЛОМКУ ВЫДАЧИ: мёртвая колонка уезжала оператору
+   * под именем `email`. На проде это выглядело как
+   * `{"login":"client@example.com","email":"@123456"}` — «почта» клиента
+   * оказывалась чужим по смыслу телеграм-хендлом.
+   */
+  it('never prints the dead login2 column as the email on the new schema', async () => {
+    const ctx = makeCtx({
+      shmList: (path) => {
+        // Ни одной строки accounts: у клиента почты нет вовсе.
+        if (path === ACCOUNTS_PATH) return [];
+        if (path === '/admin/user/search') return [row30];
+        return [row30];
+      },
+      remnaGet: () => ({ users: [], nextCursor: null, hasMore: false }),
+    });
+    const result = (await clientResolve.handler({ query: 'tg900002' }, ctx)) as {
+      identity: { schema: string };
+      shm: { matches: Array<{ email: string | null; email_from: string | null }> };
+    };
+    expect(result.identity.schema).toBe('accounts');
+    expect(result.shm.matches[0]?.email).toBeNull();
+    expect(result.shm.matches[0]?.email_from).toBeNull();
   });
 
   it('says out loud which matches it did NOT fill in', async () => {

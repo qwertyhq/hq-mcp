@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { createProbeStore } from '@hq/registry';
+import { ShmError } from '@hq/shm';
 import type { StubCall } from '../testkit.js';
 import { makeCtx } from '../testkit.js';
+import { ACCOUNTS_PATH, resetIdentitySchemaCache } from '../kit.js';
 import { UNKNOWN_CAPABILITIES } from '../platform/probe.js';
 import { clientSearch } from './search.js';
 
@@ -15,12 +17,24 @@ interface SearchOut {
 const active = { user_id: 1, login: 'active', block: 0 };
 const blocked = { user_id: 2, login: 'blocked_active', block: 1 };
 
+/** Установка до 3.0: маршрута `accounts` в роутере нет, SHM отвечает 404. */
+function legacy(rows: (path: string) => unknown): (path: string) => unknown {
+  return (path: string): unknown => {
+    if (path === ACCOUNTS_PATH) throw new ShmError('Method not found', 404);
+    return rows(path);
+  };
+}
+
 describe('client_search', () => {
+  beforeEach(() => {
+    resetIdentitySchemaCache();
+  });
+
   it('hides blocked clients by default and says so out loud', async () => {
     const calls: StubCall[] = [];
     const ctx = makeCtx({
       calls,
-      shmList: () => ({ items: 1, limit: 25, offset: 0, data: [active] }),
+      shmList: legacy(() => ({ items: 1, limit: 25, offset: 0, data: [active] })),
     });
     const result = (await clientSearch.handler(
       { text: 'active', include_blocked: false, limit: 25 },
@@ -29,8 +43,50 @@ describe('client_search', () => {
     expect(result.matches).toHaveLength(1);
     expect(result.items).toBe(1);
     expect(result.warnings.map((w) => w.code)).toContain('blocked_hidden');
-    expect(calls).toHaveLength(1);
+    // Два запроса, а не один: поиск и ОДНА проба схемы идентичности. Проба
+    // сужена по найденному клиенту — голый список `accounts` это выгрузка
+    // почт и телефонов всей базы.
+    expect(calls).toHaveLength(2);
     expect(calls[0]?.params).toEqual({ text: 'active', limit: 25 });
+    expect(calls[1]?.path).toBe(ACCOUNTS_PATH);
+    expect(calls[1]?.params).toMatchObject({ filter: JSON.stringify({ user_id: 1 }) });
+  });
+
+  /**
+   * ПОЧТА КЛИЕНТА С 3.0 В СТРОКЕ НЕ ЖИВЁТ, А КОЛОНКА `login2` — ЖИВЁТ.
+   *
+   * Миграция её не дропает, `/admin/user` отдаёт физические колонки целиком,
+   * и напечатанная как `email` она даёт довоенный адрес, а на
+   * телеграм-регистрации — хендл `@<id>`. Поиск ПО ней при этом остаётся: тот,
+   * кто ввёл старый адрес, ищет человека.
+   */
+  it('does not print the dead login2 column as an email on the new schema', async () => {
+    const row = { user_id: 5, login: 'tg123456', login2: '@123456', block: 0 };
+    const ctx = makeCtx({
+      shmList: (path) =>
+        path === ACCOUNTS_PATH
+          ? [{ login: 'tg123456', type: 'login', user_id: 5 }]
+          : { items: 1, limit: 25, offset: 0, data: [row] },
+    });
+    const result = (await clientSearch.handler(
+      { text: '123456', include_blocked: false, limit: 25 },
+      ctx,
+    )) as SearchOut & { matches: Array<{ email: string | null }> };
+    expect(result.matches[0]?.email).toBeNull();
+    expect(result.warnings.map((w) => w.code)).toContain('identity_not_in_row');
+  });
+
+  it('still reads login2 as the email on a pre-3.0 install', async () => {
+    const row = { user_id: 5, login: 'ivan', login2: 'ivan@example.test', block: 0 };
+    const ctx = makeCtx({
+      shmList: legacy(() => ({ items: 1, limit: 25, offset: 0, data: [row] })),
+    });
+    const result = (await clientSearch.handler(
+      { text: 'ivan', include_blocked: false, limit: 25 },
+      ctx,
+    )) as SearchOut & { matches: Array<{ email: string | null }> };
+    expect(result.matches[0]?.email).toBe('ivan@example.test');
+    expect(result.warnings.map((w) => w.code)).not.toContain('identity_not_in_row');
   });
 
   it('merges the blocked list, filters it locally and dedups by user_id', async () => {

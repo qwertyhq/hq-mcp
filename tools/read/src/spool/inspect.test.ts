@@ -359,7 +359,24 @@ describe('spool_inspect', () => {
     for (const bad of ['ERROR', 'PROCESSING', 'FAIL%', '']) {
       expect(() => spoolInspect.input.parse({ status: bad })).toThrow();
     }
-    for (const good of ['NEW', 'SUCCESS', 'FAIL', 'DELAYED', 'STUCK', 'PAUSED']) {
+    /**
+     * SKIPPED и DELETED в этом списке ОБЯЗАТЕЛЬНЫ. Первый спул выдаёт живьём:
+     * на боевой 3.1.0 так записана задача 843648 `prolongate services`
+     * (обработчик вернул SKIP — «нет задач в данный момент», Jobs.pm:23).
+     * Второй объявлен в Core::Const и никем не ставится. Оба отвергались как
+     * invalid_input, то есть на настоящем статусе очереди инструмент отвечал
+     * упрёком спросившему — при том что описание обещало «весь словарь».
+     */
+    for (const good of [
+      'NEW',
+      'SUCCESS',
+      'FAIL',
+      'DELAYED',
+      'STUCK',
+      'PAUSED',
+      'SKIPPED',
+      'DELETED',
+    ]) {
       expect(() => spoolInspect.input.parse({ status: good })).not.toThrow();
     }
     expect(spoolInspect.input.parse({})).toEqual({ status: null, limit: 50, stuck_minutes: 15 });

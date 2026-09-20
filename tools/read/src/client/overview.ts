@@ -8,13 +8,15 @@ import {
   capLimit,
   envelope,
   listOut,
+  lookupAccountsFor,
   num,
   settle,
   str,
   take,
   warn,
 } from '../kit.js';
-import { normalizeShmUser } from './resolve.js';
+import type { IdentitySchema, ShmAccount } from '../kit.js';
+import { applyAccounts, normalizeShmUser } from './resolve.js';
 import type { ShmUserMatch } from './resolve.js';
 
 const MAX_LIMIT = 100;
@@ -59,7 +61,7 @@ export const clientOverview = defineTool({
      */
     const panelWanted = ctx.backends.remna && remna_user_id !== null;
 
-    const [user, services, payments, withdraws, remnaUser, devices] = await Promise.all([
+    const [user, services, payments, withdraws, remnaUser, devices, identity] = await Promise.all([
       settle(ctx.shm.list<Record<string, unknown>>('/admin/user', { user_id: shm_user_id, limit: 1 })),
       settle(
         ctx.shm.list<Record<string, unknown>>('/admin/user/service', {
@@ -85,14 +87,45 @@ export const clientOverview = defineTool({
       panelWanted
         ? settle(ctx.remna.get<unknown>(`/api/hwid/devices/${String(remna_user_id ?? 0)}`))
         : Promise.resolve<{ ok: true; value: unknown }>({ ok: true, value: [] }),
+      /**
+       * ГДЕ У ЭТОЙ SHM ЛЕЖАТ ПОЧТА И ТЕЛЕФОН КЛИЕНТА — вопрос к самой SHM, и
+       * задаётся он здесь же, в общем пучке, а не после.
+       *
+       * С 3.0 адрес и номер переехали в таблицу `accounts`, а `users.login2`
+       * осталась в базе физически, со значениями, записанными ДО переезда.
+       * `/admin/user` отдаёт её как обычную колонку (`fields => '*'`,
+       * Sql/Data.pm:906), поэтому карточка клиента без этого запроса печатала
+       * бы довоенный адрес — а на телеграм-регистрации и вовсе хендл вида
+       * `@<id>` — как действующую почту. Один запрос на клиента; на установке
+       * до 3.0 он отвечает роутерным 404, и это записывается как `legacy` без
+       * degraded.
+       */
+      settle(lookupAccountsFor(ctx, { user_id: shm_user_id })),
     ]);
 
     // ВСЕ take() — ДО подсчёта предупреждений. Если посчитать degraded раньше,
     // падение трёх списков SHM не попадёт в partial_result: они разворачиваются
     // позже, и ответ окажется частичным без единого слова об этом.
     const userRow = take(user, 'shm', degraded, EMPTY_LIST).data[0];
+
+    let identitySchema: IdentitySchema = 'unknown';
+    let accountRows: ShmAccount[] = [];
+    if (identity.ok) {
+      identitySchema = identity.value.schema;
+      accountRows = identity.value.accounts;
+      // Отказ, который НЕ роутерный 404: схему установить не удалось, и почта
+      // ниже — то, что нашлось в строке, а не то, что есть у клиента.
+      if (identity.value.error !== null) degraded.push({ system: 'shm', error: identity.value.error });
+    } else {
+      degraded.push({ system: 'shm', error: identity.error });
+    }
+
+    const rawProfile: ShmUserMatch | null =
+      userRow === undefined ? null : normalizeShmUser(asRecord(userRow), identitySchema);
     const profile: ShmUserMatch | null =
-      userRow === undefined ? null : normalizeShmUser(asRecord(userRow));
+      rawProfile !== null && identitySchema === 'accounts'
+        ? applyAccounts(rawProfile, accountRows)
+        : rawProfile;
 
     // items выносится наружу по §6.4: без него «платежей нет» и «услуг нет»
     // неотличимы от «окно в 20 строк закончилось».
@@ -177,6 +210,13 @@ export const clientOverview = defineTool({
 
     return {
       shm: {
+        /**
+         * Где эта SHM держит почту и телефон клиента: `accounts` — в отдельной
+         * таблице (3.0+), `legacy` — в его строке, `unknown` — спросить не
+         * удалось. Нужно снаружи потому, что от этого зависит, чем является
+         * `user.email === null`: фактом или непрочитанным полем.
+         */
+        identitySchema,
         user: profile,
         services: serviceList,
         payments: paymentList,

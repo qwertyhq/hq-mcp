@@ -235,6 +235,11 @@ const KNOWN_CODES = [
   'shm_found_via_accounts',
   'identity_partial',
   'identity_schema_unknown',
+  // client_search: строки выдачи почты клиента БОЛЬШЕ НЕ НЕСУТ (3.0+), а
+  // добирать её на каждую строку списка — это запрос на каждого найденного.
+  // Отдельный факт от identity_partial: там «до части клиентов не дошли по
+  // потолку», здесь «не ходили ни к кому и не пойдём».
+  'identity_not_in_row',
   'shm_found_via_user_id',
   'shm_not_fully_read',
   'snapshot_predates_numeric_id',
@@ -397,6 +402,12 @@ const KNOWN_CODES = [
   // это строки таблицы `accounts`, а не одна колонка. Не то же самое, что
   // email_admin_record_differs (две половины API разошлись в одном адресе).
   'email_several_on_file',
+  // client_account_state: адресов несколько И НИ ОДИН не основной. SHM зовёт
+  // основным адрес, совпадающий с users.login, поэтому на телеграм-логине
+  // основного нет ни у кого, и порядок выдачи ничего не значит. Отдельный
+  // факт от email_several_on_file: там «их несколько», здесь «выбрать не из
+  // чего, первый — не ответ».
+  'email_primary_unset',
   'email_unverified',
   // client_account_state: ни OTP, ни passkey. Утверждение ровно о двух
   // механизмах, и предупреждение само называет третий, которого в нём нет.

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { REDACTED, redact } from '@hq/redact';
-import { renameSafeShmKeys } from '@hq/shm';
+import { ShmError, renameSafeShmKeys } from '@hq/shm';
 import { assertNotForbidden } from '@hq/registry';
 import type { StubCall } from '../testkit.js';
 import { makeCtx } from '../testkit.js';
@@ -49,6 +49,15 @@ function ctxFor(opts: Options = {}): Parameters<typeof clientAccountState.handle
   return makeCtx({
     ...(opts.calls === undefined ? {} : { calls: opts.calls }),
     shmList: (path) => {
+      /**
+       * Установка ДО 3.0: маршрута `accounts` в роутере нет, и SHM отвечает
+       * собственным 404. Раньше этого стаба здесь не было, потому что запрос
+       * туда вообще не уходил — инструмент решал по ключу `login2` в строке.
+       * Решение по строке снято (оно вырождалось на 3.1.0, где колонка жива),
+       * схема спрашивается у SHM, и «старая схема» в тестах теперь обязана
+       * выглядеть так, как она выглядит в бою.
+       */
+      if (path === ACCOUNTS_PATH) throw new ShmError('Method not found', 404);
       if (path === '/admin/user') {
         return (opts.exists ?? true) ? [opts.adminRow ?? { user_id: USER }] : [];
       }
@@ -274,8 +283,15 @@ describe('client_account_state × SHM 3.0 accounts', () => {
       calls,
       shmList: (path) => {
         if (path === ACCOUNTS_PATH) return ACCOUNTS;
-        // Строка клиента на 3.0: login2 в структуре больше нет.
-        if (path === '/admin/user') return [{ user_id: USER, login: 'tg4242' }];
+        /**
+         * Строка клиента на 3.1.0, какой её отдаёт `/admin/user`: колонка
+         * `login2` НА МЕСТЕ (миграция её не дропает, а запрос идёт
+         * `fields => '*'`), и лежит в ней довоенное значение — здесь
+         * телеграм-хендл, как его пишет телеграм-регистрация.
+         */
+        if (path === '/admin/user') {
+          return [{ user_id: USER, login: 'tg4242', login2: '@4242' }];
+        }
         return [];
       },
       shmGet: (path) => {
@@ -321,9 +337,59 @@ describe('client_account_state × SHM 3.0 accounts', () => {
     expect(codes(result)).toContain('email_several_on_file');
   });
 
-  it('does not spend a request on accounts when the row still carries login2', async () => {
+  /**
+   * РЕГРЕССИЯ НА ГЛАВНУЮ ПОЛОМКУ: раньше здесь стоял тест «не тратим запрос на
+   * accounts, когда в строке есть login2». Он проходил — и ровно поэтому на
+   * боевой 3.1.0 инструмент в accounts не ходил НИКОГДА: колонка `login2`
+   * физически осталась в таблице, а `/admin/user` отдаёт её как обычное поле.
+   */
+  it('asks SHM where identity lives even when the row still carries login2', async () => {
     const calls: StubCall[] = [];
-    await run({ adminRow: { user_id: USER, login: 'tg4242', login2: 'a@b.test' }, calls });
-    expect(calls.some((one) => one.path === ACCOUNTS_PATH)).toBe(false);
+    const input = clientAccountState.input.parse({ shm_user_id: USER });
+    const result = (await clientAccountState.handler(input, ctx30(calls))) as Record<
+      string,
+      unknown
+    >;
+    expect(calls.some((one) => one.path === ACCOUNTS_PATH)).toBe(true);
+    expect(result.identitySchema).toBe('accounts');
+  });
+
+  it('never prints the pre-migration login2 as the admin-side address', async () => {
+    // Живой случай с прода: в `login2` остался телеграм-хендл, а почта клиента
+    // с 3.0 лежит в accounts. Подставленный сюда хендл давал расхождение с
+    // клиентским маршрутом — предупреждение о конфликте, которого нет.
+    const input = clientAccountState.input.parse({ shm_user_id: USER });
+    const result = (await clientAccountState.handler(input, ctx30())) as Record<string, unknown>;
+    const email = result.email as { onAdminRecord: string | null; onAdminRecordFrom: string | null };
+    expect(email.onAdminRecord).not.toBe('@4242');
+    expect(email.onAdminRecordFrom).toBe('accounts');
+  });
+
+  /**
+   * «Основной» адрес SHM определяет сравнением с `users.login`, а логин этой
+   * установки почти всегда телеграмный — значит основного нет ни у кого, и
+   * первая строка ответа основной не является. Молча взять её — это выдать
+   * порядок выдачи базы за выбор клиента.
+   */
+  it('does not call the first of several addresses primary when none of them is', async () => {
+    const input = clientAccountState.input.parse({ shm_user_id: USER });
+    const ctx = makeCtx({
+      shmList: (path) => {
+        if (path === ACCOUNTS_PATH) return ACCOUNTS;
+        if (path === '/admin/user') return [{ user_id: USER, login: 'tg4242', login2: '@4242' }];
+        return [];
+      },
+      shmGet: (path) => {
+        if (path === '/user/email') {
+          return [
+            { email: 'first@example.test', email_verified: 1, is_primary: 0 },
+            { email: 'second@example.test', email_verified: 1, is_primary: 0 },
+          ];
+        }
+        return (SOURCE[path as keyof typeof SOURCE] as unknown) ?? [];
+      },
+    });
+    const result = (await clientAccountState.handler(input, ctx)) as Record<string, unknown>;
+    expect(codes(result)).toContain('email_primary_unset');
   });
 });

@@ -73,7 +73,6 @@ export type { PanelNaming, PrefixSource } from '@hq/shm';
 export {
   ACCOUNTS_PATH,
   emailOfAccounts,
-  identitySchemaOfRow,
   lookupAccounts,
   lookupAccountsFor,
   normalizeAccount,
@@ -304,10 +303,15 @@ export function spoolStatusName(item: unknown): string | null {
 }
 
 /**
- * Полный словарь статусов спула — app/lib/Core/Const.pm:78-83, объявлен на
- * колонке в app/lib/Core/Spool.pm:41-45. Ничего другого спул не выдаёт, и
- * выдать не может: колонка `status` это char(8) (shm_structure.sql:181), в
- * который, например, 'CANCELLED' просто не влезает.
+ * Полный словарь статусов спула — `Core::Const` (боевой Const.pm:81-90, сами имена — 82-89).
+ * Ничего другого спул не выдаёт и выдать не может: колонка `status` это
+ * char(8) (shm_structure.sql:181), в который, например, 'CANCELLED' просто не
+ * влезает.
+ *
+ * ВАЖНО: `enum` на колонке в Spool.pm:41-45 перечисляет только ШЕСТЬ первых и
+ * ОТСТАЁТ ОТ ЖИЗНИ — им нельзя пользоваться как словарём. На боевой 3.1.0
+ * задача 843648 (`prolongate services`, 2026-09-20 21:21:01) записана
+ * SKIPPED, которого в том enum нет. Сверяться надо с Const.pm.
  *
  * Живёт в kit, а не рядом с одним инструментом, по той же причине, что и
  * parseShmDate: этот словарь читают spool_inspect и provisioning_diagnose, и
@@ -329,6 +333,30 @@ export const SPOOL_DELAYED_STATUS = 'DELAYED';
  */
 export const SPOOL_STUCK_STATUS = 'STUCK';
 export const SPOOL_PAUSED_STATUS = 'PAUSED';
+/**
+ * «ДЕЛАТЬ БЫЛО НЕЧЕГО» — И ЭТО НЕ ПРОВАЛ. Появился в 3.0.
+ *
+ * Обработчик задачи вернул `SKIP` (Const.pm:46, `SKIP => 2`), и `Core::Task`
+ * превращает это в TASK_SKIPPED (Task.pm:60 и 106). Для очереди исход
+ * терминальный и приравнен к успеху: `finish_task` считает его завершением
+ * (Spool.pm 3.1.0:313-318), пишет в историю, а затем УДАЛЯЕТ строку из
+ * `spool` — или, если задача периодическая, возвращает её в DELAYED
+ * (там же, 321-330).
+ *
+ * Отсюда два разных ответа на «бывает ли SKIPPED в выдаче»: в `spool_history`
+ * он лежит постоянно (на проде он там есть), а в живой таблице `spool`
+ * встречается только между `set` и `delete` одной задачи. Читать его как
+ * поломку нельзя ни там, ни там: провала не было, работы не было.
+ */
+export const SPOOL_SKIPPED_STATUS = 'SKIPPED';
+/**
+ * Объявлен в словаре (Const.pm:89), но в 3.1.0 его никто НЕ СТАВИТ: во всём
+ * app/lib имя TASK_DELETED встречается только в самом объявлении. Оставлен в
+ * списке, чтобы фильтр по нему отвечал «ничего не нашлось», а не
+ * «invalid_input»: первое — правда об этой установке, второе — упрёк
+ * спросившему.
+ */
+export const SPOOL_DELETED_STATUS = 'DELETED';
 
 export const SPOOL_STATUSES = [
   SPOOL_NEW_STATUS,
@@ -337,6 +365,8 @@ export const SPOOL_STATUSES = [
   SPOOL_DELAYED_STATUS,
   SPOOL_STUCK_STATUS,
   SPOOL_PAUSED_STATUS,
+  SPOOL_SKIPPED_STATUS,
+  SPOOL_DELETED_STATUS,
 ] as const;
 
 /**

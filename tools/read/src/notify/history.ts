@@ -243,7 +243,7 @@ export const notifyHistory = defineTool({
       .enum(SPOOL_STATUSES)
       .nullable()
       .default(null)
-      .describe('Filter by the task status of the history row; these six are the whole vocabulary'),
+      .describe('Filter by the task status of the history row; these eight are the whole vocabulary of Core::Const. SKIPPED is a task whose handler had nothing to send — not a delivery failure'),
     only_notifications: z
       .boolean()
       .default(true)

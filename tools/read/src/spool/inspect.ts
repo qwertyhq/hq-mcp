@@ -156,7 +156,7 @@ export const spoolInspect = defineTool({
       .enum(SPOOL_STATUSES)
       .nullable()
       .default(null)
-      .describe('Filter by spool status; these six are the entire vocabulary SHM emits'),
+      .describe('Filter by spool status; these eight are the entire vocabulary Core::Const declares. SKIPPED means the handler had nothing to do (not a failure, and terminal like SUCCESS); DELETED is declared but nothing in 3.1.0 writes it'),
     limit: z.number().int().default(50).describe('Rows, capped at 200'),
     stuck_minutes: z
       .number()

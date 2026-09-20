@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import type { StubCall } from '../testkit.js';
 import { makeCtx } from '../testkit.js';
+import { ACCOUNTS_PATH, resetIdentitySchemaCache } from '../kit.js';
+import { ShmError } from '@hq/shm';
 import { clientOverview } from './overview.js';
 
 interface ListOut {
@@ -40,6 +42,14 @@ const remnaUser = {
 };
 
 const routes = (path: string): unknown => {
+  /**
+   * Установка ДО 3.0: маршрута `accounts` в роутере нет, SHM отвечает своим
+   * 404, и это не отказ источника, а факт о версии — в `degraded` он не идёт.
+   * Стаб появился вместе с запросом: карточка клиента спрашивает у SHM, где
+   * та держит почту и телефон, потому что по строке эти две схемы неотличимы
+   * (`users.login2` на 3.0+ жива и полна довоенных значений).
+   */
+  if (path === ACCOUNTS_PATH) throw new ShmError('Method not found', 404);
   if (path === '/admin/user') return [shmUser];
   if (path === '/admin/user/service') return [{ user_service_id: 51, status: 'ACTIVE' }];
   if (path === '/admin/user/pay') return [{ id: 7, money: 300 }];
@@ -48,6 +58,10 @@ const routes = (path: string): unknown => {
 };
 
 describe('client_overview', () => {
+  beforeEach(() => {
+    resetIdentitySchemaCache();
+  });
+
   it('masks connection credentials of the panel user', async () => {
     const ctx = makeCtx({
       shmList: routes,
@@ -85,7 +99,10 @@ describe('client_overview', () => {
     expect(result.shm.services.data).toHaveLength(1);
     expect(result.shm.payments.data).toHaveLength(1);
     expect(result.shm.withdraws.data).toHaveLength(1);
-    expect(calls.filter((c) => c.system === 'shm')).toHaveLength(4);
+    // Пять обращений к SHM, а не четыре: четыре списка карточки плюс ОДИН
+    // вопрос «где эта SHM держит почту и телефон клиента» (/admin/user/accounts).
+    // Он идёт в том же пучке, а не после, и на установке до 3.0 отвечает 404.
+    expect(calls.filter((c) => c.system === 'shm')).toHaveLength(5);
     expect(calls.filter((c) => c.system === 'remna')).toHaveLength(2);
   });
 
@@ -118,6 +135,7 @@ describe('client_overview', () => {
     // давало непустой degraded без единого предупреждения.
     const ctx = makeCtx({
       shmList: (path) => {
+        if (path === ACCOUNTS_PATH) throw new ShmError('Method not found', 404);
         if (path === '/admin/user') return [shmUser];
         throw new Error('SHM 500');
       },
@@ -247,9 +265,84 @@ describe('client_overview', () => {
     expect(result.shm.payments.data).toHaveLength(0);
     expect(result.shm.withdraws.data).toHaveLength(0);
     expect(result.remna?.user).toBeNull();
-    expect(result.degraded).toHaveLength(6);
-    expect(result.degraded.filter((d) => d.system === 'shm')).toHaveLength(4);
+    // Семь, а не шесть: `accounts` — седьмой источник, и его отказ тоже
+    // записан. Молчание здесь означало бы «почты у клиента нет» на ответе, в
+    // котором её просто не у кого было спросить.
+    expect(result.degraded).toHaveLength(7);
+    // Пять: четыре списка плюс проба схемы идентичности, которая тоже не
+    // ответила. Её молчание — не «почты нет», а «спросить не удалось».
+    expect(result.degraded.filter((d) => d.system === 'shm')).toHaveLength(5);
     expect(result.degraded.filter((d) => d.system === 'remna')).toHaveLength(2);
     expect(result.warnings.map((w) => w.code)).toContain('partial_result');
+  });
+});
+
+/**
+ * КАРТОЧКА КЛИЕНТА НА SHM 3.0: ПОЧТА И ТЕЛЕФОН НЕ В СТРОКЕ.
+ *
+ * `users.login2` осталась в таблице физически, с тем, что было записано ДО
+ * переезда, и `/admin/user` отдаёт её как обычную колонку. Карточка, читающая
+ * её, печатает довоенный адрес — а на телеграм-регистрации хендл `@<id>` — как
+ * действующую почту клиента.
+ */
+describe('client_overview × SHM 3.0 accounts', () => {
+  beforeEach(() => {
+    resetIdentitySchemaCache();
+  });
+
+  const row30 = { user_id: 3073, login: 'tg900001', login2: '@900001', block: 0, balance: 100 };
+  const accountRows = [
+    { login: 'tg900001', type: 'login', user_id: 3073, primary: 1 },
+    {
+      login: 'petr@example.test',
+      type: 'email',
+      user_id: 3073,
+      settings: { email: { verified: 1 } },
+      primary: 0,
+    },
+    { login: '79990000000', type: 'phone', user_id: 3073, primary: 0 },
+  ];
+
+  const routes30 = (path: string): unknown => {
+    if (path === ACCOUNTS_PATH) return accountRows;
+    if (path === '/admin/user') return [row30];
+    if (path === '/admin/user/service') return [];
+    if (path === '/admin/user/pay') return [];
+    if (path === '/admin/user/service/withdraw') return [];
+    throw new Error(`unexpected shm path ${path}`);
+  };
+
+  it('takes the email and phone from accounts instead of the dead column', async () => {
+    const ctx = makeCtx({ shmList: routes30 });
+    const result = (await clientOverview.handler(
+      { shm_user_id: 3073, remna_user_id: null, limit: 20 },
+      ctx,
+    )) as {
+      shm: {
+        identitySchema: string;
+        user: { email: string | null; email_from: string | null; phones: string[] } | null;
+      };
+      degraded: Array<{ system: string }>;
+    };
+    expect(result.shm.identitySchema).toBe('accounts');
+    expect(result.shm.user?.email).toBe('petr@example.test');
+    expect(result.shm.user?.email_from).toBe('accounts');
+    expect(result.shm.user?.phones).toEqual(['79990000000']);
+    expect(result.degraded).toEqual([]);
+  });
+
+  it('reports no email rather than the pre-migration handle when accounts has none', async () => {
+    const ctx = makeCtx({
+      shmList: (path) =>
+        path === ACCOUNTS_PATH
+          ? [{ login: 'tg900001', type: 'login', user_id: 3073, primary: 1 }]
+          : routes30(path),
+    });
+    const result = (await clientOverview.handler(
+      { shm_user_id: 3073, remna_user_id: null, limit: 20 },
+      ctx,
+    )) as { shm: { user: { email: string | null; email_from: string | null } | null } };
+    expect(result.shm.user?.email).toBeNull();
+    expect(result.shm.user?.email_from).toBeNull();
   });
 });

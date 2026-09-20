@@ -41,7 +41,6 @@ export type { PanelNaming, PrefixSource } from './naming.js';
 export {
   ACCOUNTS_PATH,
   emailOfAccounts,
-  identitySchemaOfRow,
   lookupAccounts,
   lookupAccountsFor,
   normalizeAccount,

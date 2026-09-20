@@ -4,7 +4,6 @@ import { ShmError } from './parse.js';
 import {
   ACCOUNTS_PATH,
   emailOfAccounts,
-  identitySchemaOfRow,
   lookupAccounts,
   normalizeAccount,
   phonesOfAccounts,
@@ -181,12 +180,28 @@ describe('picking one value out of the accounts of a client', () => {
   });
 });
 
-describe('identitySchemaOfRow', () => {
-  it('recognises the pre-3.0 client row by the column 3.0 dropped from the structure', () => {
-    expect(identitySchemaOfRow({ user_id: 1, login: 'a', login2: null })).toBe('legacy');
-  });
-
-  it('refuses to call a row without login2 "the new schema" — it only knows it is not the old one', () => {
-    expect(identitySchemaOfRow({ user_id: 1, login: 'a' })).toBe('unknown');
+/**
+ * ТУТ БЫЛИ ДВА ТЕСТА НА `identitySchemaOfRow`, И ОНИ ПРОХОДИЛИ, ПОКА ФУНКЦИЯ
+ * ВРАЛА НА ЖИВОЙ БАЗЕ.
+ *
+ * Оба кормили её придуманной строкой: с ключом `login2` — «старая схема», без
+ * ключа — «неизвестно». Настоящая строка 3.1.0 с `/admin/user` ключ `login2`
+ * НЕСЁТ (колонку миграция не дропает, а запрос идёт `fields => '*'`), то есть
+ * функция отвечала «старая» каждому клиенту новой схемы, и гейт вызывающего
+ * не срабатывал ни разу. Ни один тест этого не поймал, потому что ни один не
+ * показал ей строку, какую отдаёт SHM.
+ *
+ * Функция удалена, замены ей нет и не должно быть: схему отвечает только сама
+ * SHM (`lookupAccounts` выше). Вместо неё здесь проверяется, что вердикт
+ * «старая схема» стоит РОВНО на роутерном 404, а не на чём-то в данных, —
+ * тесты `lookupAccounts` выше.
+ */
+describe('identity schema is asked of SHM, never guessed from a row', () => {
+  it('calls a row that still carries the dead login2 column nothing at all', async () => {
+    // Строка 3.1.0, какой её отдаёт /admin/user: login2 на месте, внутри —
+    // довоенное значение. Раньше она читалась как доказательство схемы до 3.0.
+    const shm = stubShm(() => [{ login: 'petr@example.com', type: 'email', user_id: 4100 }]);
+    const lookup = await lookupAccounts(shm, { user_id: 4100 }, NOW);
+    expect(lookup.schema).toBe('accounts');
   });
 });

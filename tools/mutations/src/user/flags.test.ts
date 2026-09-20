@@ -285,6 +285,29 @@ describe('user_flags × phone на SHM 3.0', () => {
     expect(plan.diff.map((one) => one.path)).toEqual(['comment']);
   });
 
+  /**
+   * НЕИЗВЕСТНАЯ СХЕМА — ТОЖЕ ОТКАЗ. `unknown` значит, что маршрут не ответил
+   * ни 200, ни роутерным 404: мы не знаем, заменит запись колонку или добавит
+   * вторую строку в accounts. План с diff и откатом в этом случае — обещание,
+   * которое на половине исходов не выполняется.
+   */
+  it('отказывается писать phone, когда схему установить не удалось', async () => {
+    const w = makeWorld({
+      shmGet: () => [{ ...USER, phone: '+70000000000' }],
+      shmList: (path: string) => {
+        if (path === ACCOUNTS_PATH) throw new ShmError('Internal Server Error', 500);
+        if (path === '/admin/user/service') return listOf(SERVICES);
+        return listOf([{ ...USER, phone: '+70000000000' }]);
+      },
+      shmAction: () => [{ user_id: 3073 }],
+    });
+    const tool = userFlags(w.deps);
+    await expect(
+      callTool(tool, { user_id: 3073, fields: { phone: '+79990000002' } }, w),
+    ).rejects.toThrow(/не удалось установить/);
+    expect(w.calls.some((c) => c.method === 'POST')).toBe(false);
+  });
+
   it('на установке до 3.0 phone пишется по-прежнему', async () => {
     const w = makeWorld({
       shmGet: () => [{ ...USER, login2: null, phone: '+70000000000' }],
