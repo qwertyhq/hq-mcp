@@ -32,3 +32,21 @@ export {
   resolvePanelNaming,
 } from './naming.js';
 export type { PanelNaming, PrefixSource } from './naming.js';
+/**
+ * ГДЕ У ЭТОЙ SHM ЛЕЖИТ ИДЕНТИЧНОСТЬ КЛИЕНТА. Живёт здесь по той же причине,
+ * что и naming: источник истины — сама SHM, а потребителей больше одного
+ * (резолв клиента и состояние аккаунта в читающих инструментах, проверки
+ * принадлежности в мутаторах).
+ */
+export {
+  ACCOUNTS_PATH,
+  emailOfAccounts,
+  identitySchemaOfRow,
+  lookupAccounts,
+  lookupAccountsFor,
+  normalizeAccount,
+  phonesOfAccounts,
+  resetIdentitySchemaCache,
+  telegramIdOfAccounts,
+} from './identity.js';
+export type { AccountKind, AccountsLookup, AccountsQuery, IdentitySchema, ShmAccount } from './identity.js';

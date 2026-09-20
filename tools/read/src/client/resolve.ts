@@ -6,16 +6,21 @@ import {
   PANEL_PREFIXES_VAR,
   asArray,
   asRecord,
+  emailOfAccounts,
+  lookupAccountsFor,
+  noteOnce,
   num,
+  phonesOfAccounts,
   prefixSourcePhrase,
   settle,
   shmUserExistsParams,
   str,
   take,
   telegramIdOf,
+  telegramIdOfAccounts,
   warn,
 } from '../kit.js';
-import type { PanelNaming } from '../kit.js';
+import type { IdentitySchema, PanelNaming, ShmAccount } from '../kit.js';
 import { resolveServicePanel } from '../provisioning/diagnose.js';
 
 export interface ShmUserMatch {
@@ -28,6 +33,27 @@ export interface ShmUserMatch {
   blocked: boolean;
   matchedBy?: ShmMatchedBy;
   exact?: boolean;
+  /**
+   * ОТКУДА ВЗЯТА ПОЧТА — потому что мест два и они принадлежат РАЗНЫМ версиям
+   * SHM. До 3.0 адрес лежит в `users.login2` (той же колонке, куда
+   * телеграм-регистрация пишет `@<id>`), с 3.0 — строкой таблицы `accounts` с
+   * `type='email'`. `null` здесь означает «ни в одном из известных мест не
+   * нашлось», и это НЕ то же самое, что «почты у клиента нет»: на 3.0 адрес
+   * виден только после обхода accounts, который ограничен потолком (см.
+   * `identity.enriched`).
+   */
+  email_from: 'login2' | 'accounts' | null;
+  /**
+   * Телефоны. До 3.0 — одна колонка `users.phone`, с 3.0 — строки `accounts`
+   * с `type='phone'`, которых может быть несколько. Пустой массив — не
+   * доказательство отсутствия на 3.0 по той же причине, что и почта.
+   */
+  phones: string[];
+  /**
+   * Логины клиента из `accounts` (SHM 3.0+). `null` — либо таблицы в этой
+   * установке нет, либо этого клиента не обходили.
+   */
+  accounts: ShmAccount[] | null;
 }
 
 export type ShmMatchedBy = 'shm_user_id' | 'telegram_id' | 'login' | 'email' | null;
@@ -86,23 +112,45 @@ export interface RemnaUserMatch {
  * панели идёт по ПЕРВЫМ MAX_CLIENTS_WALKED строкам, то есть панельная половина
  * ответа собирается по чужим людям.
  */
-function exactness(match: ShmUserMatch, q: string, numeric: boolean): number {
+function exactness(
+  match: ShmUserMatch,
+  q: string,
+  numeric: boolean,
+  /**
+   * Владельцы ТОЧНОГО совпадения по таблице `accounts` (SHM 3.0+). Отдельный
+   * аргумент, а не вывод из полей строки: почта и телефон с 3.0 в строке
+   * клиента не лежат вовсе, то есть сравнение `email === wanted` ниже на такой
+   * установке не срабатывает НИКОГДА — точное попадание оказалось бы на одном
+   * ранге с подстрочным мусором.
+   */
+  exactOwners: ReadonlyMap<number, ShmMatchedBy>,
+): number {
   const wanted = q.toLowerCase();
   const login = match.login?.toLowerCase() ?? null;
   const email = match.email?.toLowerCase() ?? null;
   if (numeric && match.user_id === Number(q)) return 0;
-  if (numeric && match.telegram_id === Number(q)) return 1;
+  if (match.user_id > 0 && exactOwners.has(match.user_id)) return 1;
+  if (numeric && match.telegram_id === Number(q)) return 2;
   // `@<telegram id>` в колонке login против того же числа в запросе — одна и
   // та же строка, записанная так, как её пишет телеграм-регистрация SHM.
-  if (login === wanted || email === wanted || login === `@${wanted}`) return 2;
-  return 3;
+  if (login === wanted || email === wanted || login === `@${wanted}`) return 3;
+  return 4;
 }
 
-function matchedBy(match: ShmUserMatch, q: string, numeric: boolean): ShmMatchedBy {
+function matchedBy(
+  match: ShmUserMatch,
+  q: string,
+  numeric: boolean,
+  exactOwners: ReadonlyMap<number, ShmMatchedBy>,
+): ShmMatchedBy {
   const wanted = q.toLowerCase();
   const login = match.login?.toLowerCase() ?? null;
   const email = match.email?.toLowerCase() ?? null;
   if (numeric && match.user_id === Number(q)) return 'shm_user_id';
+  // Точное попадание по таблице accounts (SHM 3.0+) знает свой вид ключа:
+  // почта и телефон с 3.0 в строке клиента не лежат, сравнение ниже их не видит.
+  const viaAccounts = match.user_id > 0 ? exactOwners.get(match.user_id) : undefined;
+  if (viaAccounts) return viaAccounts;
   if (numeric && (match.telegram_id === Number(q) || login === `@${wanted}`)) {
     return 'telegram_id';
   }
@@ -112,14 +160,19 @@ function matchedBy(match: ShmUserMatch, q: string, numeric: boolean): ShmMatched
 }
 
 /** Сортировка устойчивая: внутри одной точности порядок SHM сохраняется. */
-function byExactness(matches: ShmUserMatch[], q: string, numeric: boolean): ShmUserMatch[] {
+function byExactness(
+  matches: ShmUserMatch[],
+  q: string,
+  numeric: boolean,
+  exactOwners: ReadonlyMap<number, ShmMatchedBy> = new Map<number, ShmMatchedBy>(),
+): ShmUserMatch[] {
   return matches
     .map((match, index) => {
-      const evidence = matchedBy(match, q, numeric);
+      const evidence = matchedBy(match, q, numeric, exactOwners);
       return {
         match: { ...match, matchedBy: evidence, exact: evidence !== null },
         index,
-        rank: exactness(match, q, numeric),
+        rank: exactness(match, q, numeric, exactOwners),
       };
     })
     .sort((a, b) => a.rank - b.rank || a.index - b.index)
@@ -168,6 +221,23 @@ const SERVICE_PROBE_BUDGET = 8;
 const SERVICES_PAGE = 25;
 
 /**
+ * Сколько ВЛАДЕЛЬЦЕВ точного совпадения по `accounts` дочитываем из
+ * `/admin/user`. Один адрес принадлежит одному клиенту, но один телефон или
+ * один телеграм-id в базе с историей переносов встречается и дважды; три —
+ * потолок, за которым добор перестаёт быть добором.
+ */
+const IDENTITY_FETCH_BUDGET = 3;
+
+/**
+ * По скольким клиентам дочитываем `accounts` ради почты и телефона. Тот же
+ * потолок, что у обхода услуг, и по той же причине: широкий текстовый запрос
+ * возвращает до 25 клиентов, и запрос на каждого превратил бы резолв в обход
+ * биллинга. Клиенты за потолком уезжают с `accounts: null` — это «не
+ * спрашивали», а не «ничего нет», и `identity.enriched` говорит это вслух.
+ */
+const IDENTITY_ENRICH_BUDGET = 3;
+
+/**
  * Чего НЕ видит обход по услугам, при любом исходе. Живёт одной строкой,
  * потому что повторяется и в отчёте о пути, и в предупреждении о пустом
  * ответе — а разъехавшись, эти две формулировки стали бы двумя разными
@@ -178,17 +248,60 @@ const SERVICE_PATH_BLIND_SPOT =
   'removed ones (status=REMOVED) — SHM applies that filter itself — so a panel account left ' +
   'behind by a removed service is invisible to this path';
 
-/** Строка SHM разнородна: settings то объект, то JSON-строка; email лежит в login2. */
+/**
+ * Строка SHM разнородна: settings то объект, то JSON-строка.
+ *
+ * ПОЧТА ЧИТАЕТСЯ ИЗ `login2` — и это верно ТОЛЬКО до SHM 3.0. С 3.0 колонки
+ * `login2` нет в `Core::User::structure` вовсе, `users.phone` дропнута
+ * миграцией 3.0.38, а `users.settings.email` вычищена миграцией 3.0.0: всё
+ * это переехало в таблицу `accounts`. Здесь остаётся ровно старый путь,
+ * потому что он бесплатен (поля уже в строке), а новый стоит отдельного
+ * запроса и добирается `applyAccounts` ниже — по клиентам, до которых дошёл
+ * потолок обхода.
+ */
 export function normalizeShmUser(row: Record<string, unknown>): ShmUserMatch {
   const balance = num(row.balance, Number.NaN);
+  const email = str(row.login2 ?? row.email);
+  const phone = str(row.phone);
   return {
     user_id: num(row.user_id ?? row.id, 0),
     login: str(row.login),
-    email: str(row.login2 ?? row.email),
+    email,
+    email_from: email === null ? null : 'login2',
+    phones: phone === null ? [] : [phone],
+    accounts: null,
     full_name: str(row.full_name),
     telegram_id: telegramIdOf(row),
     balance: Number.isFinite(balance) ? balance : null,
     blocked: row.block === 1 || row.block === true || row.block === '1',
+  };
+}
+
+/**
+ * Дополняет совпадение тем, что лежит в `accounts`. Новая схема ПОБЕЖДАЕТ
+ * старую там, где обе что-то сказали: на установке, где миграция уже прошла,
+ * `users.login2` в лучшем случае мёртвый остаток (колонку 3.0.0.sql оставляет
+ * на месте — DROP там закомментирован, — но из `structure` она снята, то есть
+ * API её больше не отдаёт), а в `accounts` лежит то, чем клиент реально
+ * пользуется.
+ *
+ * `telegram_id` — исключение: он НЕ перезаписывается, а только добирается.
+ * Миграция кладёт в `accounts` значение `settings.telegram.user_id`, а весь
+ * остальной код этой установки связывает клиента по `settings.telegram.chat_id`
+ * (и `settings.telegram` миграция НЕ вычищает — шаг 4.3 закомментирован).
+ * Для личного чата это одно и то же число, но утверждать это здесь не на чем,
+ * поэтому живое значение из строки клиента остаётся главным.
+ */
+export function applyAccounts(match: ShmUserMatch, accounts: readonly ShmAccount[]): ShmUserMatch {
+  const email = emailOfAccounts(accounts);
+  const phones = phonesOfAccounts(accounts);
+  return {
+    ...match,
+    accounts: [...accounts],
+    email: email ?? match.email,
+    email_from: email === null ? match.email_from : 'accounts',
+    phones: phones.length > 0 ? phones : match.phones,
+    telegram_id: match.telegram_id ?? telegramIdOfAccounts(accounts),
   };
 }
 
@@ -345,6 +458,72 @@ export const clientResolve = defineTool({
       }
     }
 
+    /**
+     * ТОЧНОЕ СОВПАДЕНИЕ ПО ТАБЛИЦЕ `accounts` — ВТОРОЙ ДОБОР, И ОН ЖЕ ПРОБА СХЕМЫ.
+     *
+     * С SHM 3.0 почта, телефон и привязка телеграма клиента лежат не в его
+     * строке, а отдельными строками `accounts` (см. @hq/shm/identity). Три
+     * следствия, каждое из которых по отдельности ломает резолв молча:
+     *
+     * 1. `/admin/user/search` ищет ПОДСТРОКОЙ в окне 25 строк — и на 3.0 окно
+     *    стало теснее прежнего, потому что маршрут объявил `params => {text}`
+     *    без `common_params`, то есть наш `limit` туда больше не доезжает
+     *    вовсе (v1.cgi 3.0.43: аргумент, не объявленный в схеме маршрута,
+     *    молча выбрасывается, ответ 200). Точный адрес в такое окно попадает
+     *    не всегда — ровно та же беда, от которой выше добирается user_id.
+     * 2. `accounts.login` — КЛЮЧ таблицы, поэтому запрос по нему даёт ТОЧНОЕ
+     *    совпадение, а не подстроку: единственный способ ответить «этот адрес
+     *    принадлежит вот этому клиенту» без догадки.
+     * 3. Ответ этого же запроса говорит, какая схема живёт в базе СЕЙЧАС.
+     *    Отдельной пробы нет намеренно: сервер не перезапускается в момент
+     *    миграции, и проба со вторым запросом могла бы прийтись на другую
+     *    сторону перехода.
+     *
+     * На установке до 3.0 маршрута нет, SHM отвечает своим 404, и это
+     * записывается как `legacy` — без degraded: отсутствие маршрута не отказ
+     * источника, а факт о версии.
+     */
+    const lookupKey = q.replace(/^@/, '').trim();
+    const exact =
+      lookupKey === ''
+        ? null
+        : await settle(lookupAccountsFor(ctx, { login: lookupKey.toLowerCase() }));
+    let schema: IdentitySchema = 'unknown';
+    if (exact !== null && exact.ok) {
+      schema = exact.value.schema;
+      // `error !== null` — маршрут ответил ОТКАЗОМ, но не роутерным 404, то
+      // есть схему установить не удалось. Это частичный ответ, а не факт о
+      // версии, и молчать о нём нельзя.
+      if (exact.value.error !== null) noteOnce(degraded, 'shm', exact.value.error);
+    }
+    if (exact !== null && !exact.ok) noteOnce(degraded, 'shm', exact.error);
+
+    const exactAccounts = exact !== null && exact.ok ? exact.value.accounts : [];
+    const known = new Set(rows.map(asRecord).map((row) => num(row.user_id ?? row.id, 0)));
+    const missingOwners = [
+      ...new Set(exactAccounts.map((one) => one.user_id).filter((id) => id > 0 && !known.has(id))),
+    ].slice(0, IDENTITY_FETCH_BUDGET);
+    for (const ownerId of missingOwners) {
+      const owner = await settle(
+        ctx.shm.list<Record<string, unknown>>('/admin/user', shmUserExistsParams(ownerId)),
+      );
+      const ownerRows = take(owner, 'shm', degraded, EMPTY_LIST).data;
+      if (ownerRows.length > 0) rows = [...ownerRows, ...rows];
+    }
+    if (missingOwners.length > 0) {
+      const types = [...new Set(exactAccounts.map((one) => one.type))].join(', ');
+      warnings.push(
+        warn(
+          'shm_found_via_accounts',
+          `The identifier matched exactly in the SHM \`accounts\` table (row type: ${types}) on ` +
+            `${String(missingOwners.length)} client(s) that /admin/user/search did not return. ` +
+            'From SHM 3.0 the email, phone and telegram binding live there and not in the client ' +
+            'row, and the search route matches them only as a SUBSTRING inside a 25-row window ' +
+            'it no longer lets this server widen. These clients are first in `shm.matches`.',
+        ),
+      );
+    }
+
     if (rows.length === 0 && shmResult.ok) {
       warnings.push(
         warn(
@@ -402,7 +581,15 @@ export const clientResolve = defineTool({
     // telegram id, то user_id, и на одном клиенте они совпадут), а два
     // одинаковых клиента в ответе — это ещё и два прохода обхода услуг по нему.
     const seen = new Set<number>();
-    const shmMatches = byExactness(
+    const exactOwners = new Map<number, ShmMatchedBy>();
+    for (const one of exactAccounts) {
+      if (one.user_id <= 0 || exactOwners.has(one.user_id)) continue;
+      exactOwners.set(
+        one.user_id,
+        one.kind === 'email' ? 'email' : one.kind === 'telegram' ? 'telegram_id' : 'login',
+      );
+    }
+    const ranked = byExactness(
       rows
         .map(asRecord)
         .map(normalizeShmUser)
@@ -413,7 +600,67 @@ export const clientResolve = defineTool({
         }),
       q,
       numeric,
+      exactOwners,
     );
+
+    /**
+     * ДОБОР ИДЕНТИЧНОСТИ ИЗ `accounts` — по верхушке списка и только там, где
+     * таблица есть.
+     *
+     * Ранжирование идёт ДО этого шага намеренно: обходить имеет смысл тех, кто
+     * уже признан похожим на ответ, а не первых попавшихся из подстрочного
+     * окна. Строки, до которых потолок не дошёл, уезжают с `accounts: null` и
+     * прежней почтой из `login2` — на 3.0 это `null`, и `email_from: null`
+     * говорит ровно это: «ни в одном известном месте не нашлось», а не «почты
+     * у клиента нет».
+     */
+    const enrichable = schema === 'accounts' ? ranked.slice(0, IDENTITY_ENRICH_BUDGET) : [];
+    const enriched = new Map<number, ShmAccount[]>();
+    // Точное совпадение уже прочитано — второй раз за тем же не ходим.
+    for (const one of exactAccounts) {
+      enriched.set(one.user_id, [...(enriched.get(one.user_id) ?? []), one]);
+    }
+    for (const match of enrichable) {
+      if (match.user_id <= 0) continue;
+      const page = await settle(lookupAccountsFor(ctx, { user_id: match.user_id }));
+      if (!page.ok) {
+        noteOnce(degraded, 'shm', page.error);
+        continue;
+      }
+      if (page.value.error !== null) {
+        noteOnce(degraded, 'shm', page.value.error);
+        continue;
+      }
+      enriched.set(match.user_id, page.value.accounts);
+    }
+    const shmMatches = ranked.map((match) =>
+      enriched.has(match.user_id) ? applyAccounts(match, enriched.get(match.user_id) ?? []) : match,
+    );
+
+    if (schema === 'accounts' && ranked.length > enrichable.length) {
+      warnings.push(
+        warn(
+          'identity_partial',
+          `The email, phone and telegram binding of a client live in the SHM \`accounts\` table ` +
+            `on this installation (3.0+), which costs one request per client, so only the first ` +
+            `${String(enrichable.length)} of ${String(ranked.length)} matches were filled in. ` +
+            'For the rest `accounts` is null and `email_from` is null — that means "not asked", ' +
+            'never "this client has no email". Resolve one client at a time to see theirs.',
+        ),
+      );
+    }
+    if (schema === 'unknown' && exact !== null) {
+      warnings.push(
+        warn(
+          'identity_schema_unknown',
+          'This server could not establish where this SHM keeps client identity: ' +
+            'GET /admin/user/accounts neither answered nor returned the router 404 that means ' +
+            '"older than 3.0". Emails, phones and telegram bindings below come from the client ' +
+            'row alone (users.login2), which is empty on 3.0 — so a null email here proves ' +
+            'nothing either way. See `degraded`.',
+        ),
+      );
+    }
 
     /**
      * ВТОРОЙ путь в панель — через услуги клиента, тот самый, которым ходит
@@ -652,6 +899,18 @@ export const clientResolve = defineTool({
 
     return {
       query: q,
+      /**
+       * ГДЕ ЭТА SHM ДЕРЖИТ ИДЕНТИЧНОСТЬ — отдаётся наружу по той же причине,
+       * что и `remna.paths`: пустая почта без этого поля читается как факт о
+       * клиенте, хотя чаще это факт о том, куда мы смотрели.
+       */
+      identity: {
+        schema,
+        /** Сколько совпадений дочитано из `accounts`; остальные — `accounts: null`. */
+        enriched: enrichable.length,
+        /** Точное совпадение идентификатора со строкой `accounts`, если было. */
+        exact_match_types: [...new Set(exactAccounts.map((one) => one.type))],
+      },
       shm: { matches: shmMatches, count: shmMatches.length },
       remna: {
         matches: remnaMatches,

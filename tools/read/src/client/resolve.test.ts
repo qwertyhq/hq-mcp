@@ -1,10 +1,21 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { Budget } from '@hq/budget';
 import { createRemnaClient } from '@hq/remna';
+import { ShmError } from '@hq/shm';
 import type { StubCall } from '../testkit.js';
 import { makeCtx } from '../testkit.js';
-import { num } from '../kit.js';
+import { ACCOUNTS_PATH, num, resetIdentitySchemaCache } from '../kit.js';
 import { clientResolve } from './resolve.js';
+
+/**
+ * Вердикт «таблицы accounts нет» живёт в МОДУЛЬНОМ кэше — он и должен, иначе
+ * каждый резолв на установке до 3.0 платил бы лишним 404. В тестах время
+ * заморожено, то есть кэш внутри прогона не истекает никогда, и вердикт одного
+ * теста доехал бы до всех следующих.
+ */
+beforeEach(() => {
+  resetIdentitySchemaCache();
+});
 
 interface ResolveOut {
   query: string;
@@ -528,5 +539,228 @@ describe('client_resolve — real Remnawave 404 vs 500 on the by-username lookup
     expect(result.remna.count).toBe(0);
     expect(result.degraded).toHaveLength(1);
     expect(result.degraded[0]?.system).toBe('remna');
+  });
+});
+
+/**
+ * SHM 3.0 УНЕСЛА ИДЕНТИЧНОСТЬ КЛИЕНТА ИЗ ЕГО СТРОКИ В ТАБЛИЦУ `accounts`.
+ *
+ * Строка клиента на 3.0 больше не несёт ни `login2` (колонка снята из
+ * `Core::User::structure`), ни `settings.email` (вычищено миграцией 3.0.0), а
+ * `users.phone` дропнута миграцией 3.0.38. Резолвер, читающий только строку,
+ * на такой установке отвечает `email: null` КАЖДОМУ клиенту — не отказом, а
+ * пустым полем, которое читается как факт о человеке.
+ *
+ * Обе схемы проверяются здесь одним набором тестов намеренно: сервер не
+ * перезапускается в момент миграции, и «работает на 3.0» без «по-прежнему
+ * работает на 2.19» — это не готовность к переезду, а перенос поломки.
+ */
+describe('client_resolve × identity schema (SHM 2.19 vs 3.0)', () => {
+  /** Строка клиента, какой её отдаёт 3.0: без login2, без phone. */
+  const row30 = {
+    user_id: 4100,
+    login: 'tg900002',
+    full_name: 'Petr',
+    balance: '10.00',
+    block: 0,
+    settings: '{"telegram":{"chat_id":900002}}',
+  };
+
+  /** Строка `accounts`: почта клиента лежит в колонке, которая зовётся `login`. */
+  const accountRows = [
+    { login: 'tg900002', type: 'login', user_id: 4100, settings: null, primary: 1 },
+    {
+      login: 'petr@example.com',
+      type: 'email',
+      user_id: 4100,
+      settings: { email: { verified: 1 } },
+      primary: 0,
+    },
+    { login: '79990000000', type: 'phone', user_id: 4100, settings: null, primary: 0 },
+    { login: '900002', type: 'telegram', user_id: 4100, settings: null, primary: 0 },
+  ];
+
+  function ctx30(calls: StubCall[] = []) {
+    return makeCtx({
+      calls,
+      shmList: (path) => {
+        if (path === ACCOUNTS_PATH) return accountRows;
+        if (path === '/admin/user/search') return [row30];
+        if (path === '/admin/user') return [row30];
+        return [];
+      },
+      remnaGet: () => ({ users: [], nextCursor: null, hasMore: false }),
+    });
+  }
+
+  it('fills email, phone and telegram from accounts when the 3.0 table is there', async () => {
+    const result = (await clientResolve.handler({ query: 'petr@example.com' }, ctx30())) as {
+      identity: { schema: string; enriched: number; exact_match_types: string[] };
+      shm: {
+        matches: Array<{
+          email: string | null;
+          email_from: string | null;
+          phones: string[];
+          telegram_id: number | null;
+        }>;
+      };
+    };
+    expect(result.identity.schema).toBe('accounts');
+    const first = result.shm.matches[0];
+    expect(first?.email).toBe('petr@example.com');
+    expect(first?.email_from).toBe('accounts');
+    expect(first?.phones).toEqual(['79990000000']);
+    // Привязка телеграма берётся из живой строки клиента, а не из accounts:
+    // миграция копирует туда settings.telegram.user_id, а вся остальная
+    // связка этой установки идёт по chat_id, и это РАЗНЫЕ поля.
+    expect(first?.telegram_id).toBe(900002);
+  });
+
+  it('puts the email under a field name @hq/redact masks, not under `login`', async () => {
+    // Настоящая утечка, а не косметика: в базе 3.0 почта и телефон лежат в
+    // колонке `login`, а маскирование PII идёт ПО ИМЕНИ ПОЛЯ. Отдай мы строку
+    // как есть — профиль `bot` получил бы почту клиента открытым текстом.
+    const result = (await clientResolve.handler({ query: 'petr@example.com' }, ctx30())) as {
+      shm: { matches: Array<{ accounts: Array<Record<string, unknown>> | null }> };
+    };
+    const accounts = result.shm.matches[0]?.accounts ?? [];
+    const email = accounts.find((one) => one.kind === 'email');
+    const phone = accounts.find((one) => one.kind === 'phone');
+    expect(email?.email).toBe('petr@example.com');
+    expect(email?.login).toBeNull();
+    expect(phone?.phone).toBe('79990000000');
+    expect(phone?.login).toBeNull();
+    // settings строки accounts наружу не едет вовсе: у типа `login` там лежит
+    // password.hash (Core::User::Logins::set_password).
+    expect(accounts.every((one) => !('settings' in one))).toBe(true);
+  });
+
+  it('asks accounts by the exact table key, never by a substring', async () => {
+    const calls: StubCall[] = [];
+    await clientResolve.handler({ query: 'Petr@Example.com' }, ctx30(calls));
+    const exact = calls.find((c) => c.path === ACCOUNTS_PATH);
+    expect(exact?.params).toMatchObject({ login: 'petr@example.com' });
+  });
+
+  it('pulls in a client the substring search missed and says so', async () => {
+    // Окно /admin/user/search на 3.0 стало теснее: маршрут объявил
+    // params => {text} без common_params, то есть наш limit туда не доезжает.
+    const calls: StubCall[] = [];
+    const ctx = makeCtx({
+      calls,
+      shmList: (path, params) => {
+        if (path === ACCOUNTS_PATH) {
+          // Точное совпадение указывает на клиента, которого поиск не вернул.
+          if (params?.login === 'petr@example.com') {
+            return [
+              {
+                login: 'petr@example.com',
+                type: 'email',
+                user_id: 4100,
+                settings: { email: { verified: 1 } },
+              },
+            ];
+          }
+          return accountRows;
+        }
+        if (path === '/admin/user/search') return [{ user_id: 77, login: 'someone-else' }];
+        if (path === '/admin/user') return [row30];
+        return [];
+      },
+      remnaGet: () => ({ users: [], nextCursor: null, hasMore: false }),
+    });
+    const result = (await clientResolve.handler({ query: 'petr@example.com' }, ctx)) as {
+      identity: { exact_match_types: string[] };
+      shm: { matches: Array<{ user_id: number }>; count: number };
+      warnings: Array<{ code: string }>;
+    };
+    expect(result.warnings.map((w) => w.code)).toContain('shm_found_via_accounts');
+    expect(result.identity.exact_match_types).toEqual(['email']);
+    // Владелец точного совпадения — первым, посторонний из подстрочного окна — за ним.
+    expect(result.shm.matches[0]?.user_id).toBe(4100);
+    expect(result.shm.count).toBe(2);
+  });
+
+  it('reads a router 404 as "older than 3.0" and keeps working off login2', async () => {
+    const calls: StubCall[] = [];
+    const ctx = makeCtx({
+      calls,
+      shmList: (path) => {
+        // Так отвечает SHM до 3.0: маршрута нет в роутере вовсе.
+        if (path === ACCOUNTS_PATH) throw new ShmError('Method not found', 404);
+        return [
+          {
+            user_id: 3073,
+            login: 'tg900001',
+            login2: 'client@example.com',
+            phone: '79990000001',
+            block: 0,
+            settings: '{"telegram":{"chat_id":900001}}',
+          },
+        ];
+      },
+      remnaGet: () => ({ users: [], nextCursor: null, hasMore: false }),
+    });
+    const result = (await clientResolve.handler({ query: 'client@example.com' }, ctx)) as {
+      identity: { schema: string; enriched: number };
+      shm: { matches: Array<{ email: string | null; email_from: string | null; phones: string[] }> };
+      warnings: Array<{ code: string }>;
+      degraded: Array<{ system: string }>;
+    };
+    expect(result.identity.schema).toBe('legacy');
+    expect(result.identity.enriched).toBe(0);
+    expect(result.shm.matches[0]?.email).toBe('client@example.com');
+    expect(result.shm.matches[0]?.email_from).toBe('login2');
+    expect(result.shm.matches[0]?.phones).toEqual(['79990000001']);
+    // Отсутствие маршрута — факт о ВЕРСИИ, а не отказ источника.
+    expect(result.degraded).toEqual([]);
+    expect(result.warnings.map((w) => w.code)).not.toContain('identity_partial');
+    // И больше в accounts не ходим: вердикт закэширован.
+    expect(result.warnings.map((w) => w.code)).not.toContain('identity_schema_unknown');
+  });
+
+  it('does not read a 500 from the accounts route as "older than 3.0"', async () => {
+    // Молчаливое «схема старая» на отвалившемся бэкенде вернуло бы ровно ту
+    // тихую поломку, ради которой всё это написано.
+    const ctx = makeCtx({
+      shmList: (path) => {
+        if (path === ACCOUNTS_PATH) throw new ShmError('boom', 500);
+        return [row30];
+      },
+      remnaGet: () => ({ users: [], nextCursor: null, hasMore: false }),
+    });
+    const result = (await clientResolve.handler({ query: 'petr@example.com' }, ctx)) as {
+      identity: { schema: string };
+      warnings: Array<{ code: string }>;
+      degraded: Array<{ system: string }>;
+    };
+    expect(result.identity.schema).toBe('unknown');
+    expect(result.warnings.map((w) => w.code)).toContain('identity_schema_unknown');
+    expect(result.degraded.some((one) => one.system === 'shm')).toBe(true);
+  });
+
+  it('says out loud which matches it did NOT fill in', async () => {
+    const many = Array.from({ length: 6 }, (_, index) => ({
+      user_id: 5000 + index,
+      login: `tg90000${String(index)}`,
+      block: 0,
+    }));
+    const ctx = makeCtx({
+      shmList: (path) => {
+        if (path === ACCOUNTS_PATH) return [];
+        if (path === '/admin/user/search') return many;
+        return [];
+      },
+      remnaGet: () => ({ users: [], nextCursor: null, hasMore: false }),
+    });
+    const result = (await clientResolve.handler({ query: 'tg9' }, ctx)) as {
+      identity: { enriched: number };
+      shm: { matches: Array<{ accounts: unknown[] | null }> };
+      warnings: Array<{ code: string }>;
+    };
+    expect(result.identity.enriched).toBe(3);
+    expect(result.warnings.map((w) => w.code)).toContain('identity_partial');
+    // Те, до кого потолок не дошёл, несут null — «не спрашивали», а не «пусто».
+    expect(result.shm.matches[5]?.accounts).toBeNull();
   });
 });

@@ -65,6 +65,24 @@ export {
 } from '@hq/shm';
 export type { PanelNaming, PrefixSource } from '@hq/shm';
 
+/**
+ * ГДЕ У ЭТОЙ SHM ЛЕЖИТ ИДЕНТИЧНОСТЬ КЛИЕНТА — ре-экспорт по той же причине,
+ * что и именование выше: реализация живёт в `@hq/shm` (identity.ts), потому
+ * что источник истины — сама SHM, а читающим инструментам это часть кита.
+ */
+export {
+  ACCOUNTS_PATH,
+  emailOfAccounts,
+  identitySchemaOfRow,
+  lookupAccounts,
+  lookupAccountsFor,
+  normalizeAccount,
+  phonesOfAccounts,
+  resetIdentitySchemaCache,
+  telegramIdOfAccounts,
+} from '@hq/shm';
+export type { AccountKind, AccountsLookup, AccountsQuery, IdentitySchema, ShmAccount } from '@hq/shm';
+
 /** Мягкая деградация: неудача одной системы не роняет весь ответ, а помечается. */
 export function take<T>(
   result: Settled<T>,

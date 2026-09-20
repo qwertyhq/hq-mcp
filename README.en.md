@@ -131,6 +131,13 @@ warning `sign_in_flag_absent` rather than passed off as a diagnosis. The full
 route list for both systems, the release each route first appeared in, and the
 long answer about forks are in [COMPATIBILITY.md](COMPATIBILITY.md).
 
+**SHM 3.0 is supported, but off the sources rather than a live install.** In 3.0
+the login, email, phone and telegram binding moved out of the client row into an
+`accounts` table, and `v1.cgi` began silently dropping undeclared arguments. The
+tools work on BOTH schemas and establish the live one from SHM's own answer, not
+from a version number; what moved, what that breaks and what is left for a human
+are in [COMPATIBILITY.md](COMPATIBILITY.md#shm-30).
+
 Checking takes one call — the same `platform_probe`. When a version is below its
 floor it answers with a `backend_version_below_minimum` warning naming the
 version, the floor and exactly what breaks. Nothing is switched off by that: an

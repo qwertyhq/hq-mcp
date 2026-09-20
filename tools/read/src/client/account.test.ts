@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { REDACTED, redact } from '@hq/redact';
 import { renameSafeShmKeys } from '@hq/shm';
 import { assertNotForbidden } from '@hq/registry';
 import type { StubCall } from '../testkit.js';
 import { makeCtx } from '../testkit.js';
+import { ACCOUNTS_PATH, resetIdentitySchemaCache } from '../kit.js';
 import { clientAccountState } from './account.js';
 
 const USER = 4242;
@@ -84,8 +85,10 @@ describe('client_account_state', () => {
     });
     expect(result.email).toEqual({
       address: 'client@example.test',
+      allAddresses: ['client@example.test'],
       verified: true,
       onAdminRecord: '@100000001',
+      onAdminRecordFrom: 'login2',
       matchesAdminRecord: false,
     });
     expect(codes(result)).toContain('email_admin_record_differs');
@@ -104,8 +107,10 @@ describe('client_account_state', () => {
     const result = await run();
     expect(result.email).toEqual({
       address: 'client@example.test',
+      allAddresses: ['client@example.test'],
       verified: true,
       onAdminRecord: null,
+      onAdminRecordFrom: null,
       matchesAdminRecord: null,
     });
     expect(result.otp).toEqual({
@@ -240,5 +245,85 @@ describe('client_account_state', () => {
     for (const path of ['/user/email', '/user/otp', '/user/passkey', '/user/password-auth', '/user/referrals']) {
       expect(() => assertNotForbidden(path, 'GET')).not.toThrow();
     }
+  });
+});
+
+/**
+ * SHM 3.0 УБРАЛА `users.login2`, И ВМЕСТЕ С НЕЙ — ВТОРУЮ ПОЛОВИНУ СРАВНЕНИЯ.
+ *
+ * Весь смысл блока `email` здесь в том, что источников адреса ДВА и они
+ * расходятся. На 3.0 вторая половина не «пустая», а переехала в таблицу
+ * `accounts`: инструмент, продолжающий читать `login2`, получает `null`,
+ * `matchesAdminRecord` становится `null`, и предупреждение о расхождении не
+ * срабатывает никогда. Со стороны это выглядит как «расхождений нет».
+ */
+describe('client_account_state × SHM 3.0 accounts', () => {
+  const ACCOUNTS = [
+    { login: 'tg4242', type: 'login', user_id: USER, primary: 1 },
+    {
+      login: 'other@example.test',
+      type: 'email',
+      user_id: USER,
+      settings: { email: { verified: 1 } },
+      primary: 0,
+    },
+  ];
+
+  function ctx30(calls: StubCall[] = []): Parameters<typeof clientAccountState.handler>[1] {
+    return makeCtx({
+      calls,
+      shmList: (path) => {
+        if (path === ACCOUNTS_PATH) return ACCOUNTS;
+        // Строка клиента на 3.0: login2 в структуре больше нет.
+        if (path === '/admin/user') return [{ user_id: USER, login: 'tg4242' }];
+        return [];
+      },
+      shmGet: (path) => {
+        if (path === '/user/email') {
+          // get_emails: МАССИВ, отсортированный primary-первым.
+          return [
+            { email: 'client@example.test', email_verified: 1, is_primary: 1 },
+            { email: 'other@example.test', email_verified: 1, is_primary: 0 },
+          ];
+        }
+        return (SOURCE[path as keyof typeof SOURCE] as unknown) ?? [];
+      },
+    });
+  }
+
+  beforeEach(() => {
+    resetIdentitySchemaCache();
+  });
+
+  it('finds the admin-side address where 3.0 moved it, instead of reporting none', async () => {
+    const input = clientAccountState.input.parse({ shm_user_id: USER });
+    const result = (await clientAccountState.handler(input, ctx30())) as Record<string, unknown>;
+    const email = result.email as {
+      onAdminRecord: string | null;
+      onAdminRecordFrom: string | null;
+      matchesAdminRecord: boolean | null;
+      allAddresses: string[];
+    };
+    expect(result.identitySchema).toBe('accounts');
+    expect(email.onAdminRecord).toBe('other@example.test');
+    expect(email.onAdminRecordFrom).toBe('accounts');
+    // Сравнение СОСТОЯЛОСЬ и разошлось — вместо молчаливого null.
+    expect(email.matchesAdminRecord).toBe(false);
+    expect(codes(result)).toContain('email_admin_record_differs');
+  });
+
+  it('reports every address on file, not just the primary one', async () => {
+    const input = clientAccountState.input.parse({ shm_user_id: USER });
+    const result = (await clientAccountState.handler(input, ctx30())) as Record<string, unknown>;
+    const email = result.email as { address: string | null; allAddresses: string[] };
+    expect(email.address).toBe('client@example.test');
+    expect(email.allAddresses).toEqual(['client@example.test', 'other@example.test']);
+    expect(codes(result)).toContain('email_several_on_file');
+  });
+
+  it('does not spend a request on accounts when the row still carries login2', async () => {
+    const calls: StubCall[] = [];
+    await run({ adminRow: { user_id: USER, login: 'tg4242', login2: 'a@b.test' }, calls });
+    expect(calls.some((one) => one.path === ACCOUNTS_PATH)).toBe(false);
   });
 });

@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { ACCOUNTS_PATH, ShmError, resetIdentitySchemaCache } from '@hq/shm';
 import { ALLOWED_USER_FIELDS, FORBIDDEN_USER_FIELDS, userFlags } from './flags.js';
 import { callTool, listOf, makeWorld, planThenApply } from '../testkit.js';
 import type { FakeWorld } from '../testkit.js';
@@ -235,5 +236,70 @@ describe('user_flags', () => {
     await expect(callTool(tool, { user_id: 4242, fields: { block: 1 } }, w)).rejects.toThrow(
       /не найден в SHM/,
     );
+  });
+});
+
+/**
+ * SHM 3.0 сделала `phone` ВИРТУАЛЬНЫМ полем над таблицей `accounts`:
+ * `Core::User::set` перехватывает его и зовёт `_set_legacy_phone`, который
+ * умеет только ДОБАВИТЬ номер. Ни замены, ни удаления, а пустая строка для
+ * него — вовсе no-op. То есть diff «было → стало» и обещанный откат
+ * описывают операцию, которой не произойдёт.
+ */
+describe('user_flags × phone на SHM 3.0', () => {
+  function world30(): FakeWorld {
+    const row = { ...USER, phone: '79990000001' };
+    return makeWorld({
+      shmGet: () => [row],
+      shmList: (path: string) => {
+        if (path === ACCOUNTS_PATH) {
+          return listOf([{ login: '79990000001', type: 'phone', user_id: 3073 }]);
+        }
+        if (path === '/admin/user/service') return listOf(SERVICES);
+        return listOf([row]);
+      },
+      shmAction: () => [{ user_id: 3073 }],
+    });
+  }
+
+  beforeEach(() => {
+    resetIdentitySchemaCache();
+  });
+
+  it('отказывается писать phone, когда номера живут в accounts', async () => {
+    const w = world30();
+    const tool = userFlags(w.deps);
+    await expect(
+      callTool(tool, { user_id: 3073, fields: { phone: '79990000002' } }, w),
+    ).rejects.toThrow(/accounts/);
+    // И ничего не записал.
+    expect(w.calls.some((c) => c.method === 'POST')).toBe(false);
+  });
+
+  it('остальные поля на той же установке работают как прежде', async () => {
+    const w = world30();
+    const tool = userFlags(w.deps);
+    const plan = (await callTool(tool, { user_id: 3073, fields: { comment: 'ok' } }, w)) as {
+      diff: Array<{ path: string }>;
+    };
+    expect(plan.diff.map((one) => one.path)).toEqual(['comment']);
+  });
+
+  it('на установке до 3.0 phone пишется по-прежнему', async () => {
+    const w = makeWorld({
+      shmGet: () => [{ ...USER, login2: null, phone: '+70000000000' }],
+      shmList: (path: string) => {
+        // Так отвечает SHM до 3.0: маршрута accounts в роутере нет вовсе.
+        if (path === ACCOUNTS_PATH) throw new ShmError('Method not found', 404);
+        if (path === '/admin/user/service') return listOf(SERVICES);
+        return listOf([{ ...USER, login2: null, phone: '+70000000000' }]);
+      },
+      shmAction: () => [{ user_id: 3073 }],
+    });
+    const tool = userFlags(w.deps);
+    const plan = (await callTool(tool, { user_id: 3073, fields: { phone: '+79990000002' } }, w)) as {
+      diff: Array<{ path: string; from: unknown; to: unknown }>;
+    };
+    expect(plan.diff).toEqual([{ path: 'phone', from: '+70000000000', to: '+79990000002' }]);
   });
 });

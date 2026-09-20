@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { buildDiff } from '@hq/confirm';
+import { lookupAccountsFor } from '@hq/shm';
 import { defineMutation, planIdField } from '../kit.js';
 import type { MutationDeps, MutationTool, PlanDraft } from '../kit.js';
 import type { AuditTarget } from '@hq/audit';
@@ -217,6 +218,40 @@ export function userFlags(deps: MutationDeps): MutationTool {
         }
         if (keys.length === 0) {
           throw new Error('user_flags: не передано ни одного поля для изменения');
+        }
+
+        /**
+         * `phone` НА SHM 3.0 — НЕ ТО ПОЛЕ, КОТОРЫМ ОНО ВЫГЛЯДИТ.
+         *
+         * С 3.0 колонки `users.phone` нет вовсе (дропнута миграцией 3.0.38), а
+         * одноимённое поле структуры объявлено ВИРТУАЛЬНЫМ: `Core::User::set`
+         * перехватывает его и зовёт `_set_legacy_phone`, который умеет ровно
+         * одно действие — ДОБАВИТЬ строку в `accounts` с type='phone'. Он не
+         * заменяет прежний номер и не удаляет его; пустая строка для него —
+         * вообще no-op. `list_for_api` потом склеивает все номера клиента через
+         * запятую, поэтому «сменил телефон» превращается в «теперь их два», а
+         * объявленный здесь rollback (записать старое значение обратно) —
+         * в «теперь их три».
+         *
+         * Инструмент, который показывает diff `было → стало` и откат, которого
+         * не существует, врёт дважды. Поэтому на новой схеме поле отвергается,
+         * а не пишется «как получится».
+         */
+        if (keys.includes('phone')) {
+          const identity = await lookupAccountsFor(ctx, { user_id: i.user_id });
+          if (identity.schema === 'accounts') {
+            throw new Error(
+              'user_flags: поле phone на этой SHM (3.0+) писать нельзя. Колонки users.phone ' +
+                'больше нет: номера лежат строками таблицы accounts, а POST /admin/user с этим ' +
+                'полем уходит в Core::User::_set_legacy_phone, который умеет только ДОБАВИТЬ ' +
+                'номер — не заменить и не удалить. То есть diff «было → стало» и откат, ' +
+                'обещанные этим планом, не соответствуют тому, что произойдёт: у клиента станет ' +
+                'на один номер больше, а list_for_api склеит их через запятую. Правка номера на ' +
+                '3.0 — это операция над accounts (POST/DELETE /admin/user/accounts), и этот ' +
+                'сервер её не выполняет. Остальные поля (block, full_name, comment) работают ' +
+                'как прежде.',
+            );
+          }
         }
 
         const row = await readUser(ctx, i.user_id);

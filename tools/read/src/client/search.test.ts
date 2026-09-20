@@ -249,3 +249,44 @@ describe('client_search input schema', () => {
     expect(typeof (clientSearch.input as unknown as { shape?: unknown }).shape).toBe('object');
   });
 });
+
+describe('client_search × SHM 3.0 argument whitelist', () => {
+  /**
+   * С 3.0 `/admin/user/search` принимает ровно один аргумент — `text`, — а
+   * всё остальное v1.cgi выбрасывает молча и отвечает 200. Инструмент,
+   * попросивший 200 строк и получивший 25, обязан это заметить: иначе
+   * «клиента в результатах нет» становится утверждением о человеке.
+   */
+  it('замечает, что limit выброшен, и не выдаёт окно за полный ответ', async () => {
+    const page = Array.from({ length: 25 }, (_, index) => ({
+      user_id: 6000 + index,
+      login: `client${String(index)}`,
+      block: 0,
+    }));
+    const ctx = makeCtx({
+      shmList: () => ({ items: 412, limit: 25, offset: 0, data: page }),
+    });
+    const result = (await clientSearch.handler(
+      clientSearch.input.parse({ text: 'client', limit: 200 }),
+      ctx,
+    )) as { warnings: Array<{ code: string }>; items: number };
+    expect(result.warnings.map((one) => one.code)).toContain('search_limit_ignored');
+    expect(result.items).toBe(412);
+  });
+
+  it('молчит, когда маршрут наш limit всё-таки принял', async () => {
+    const page = Array.from({ length: 40 }, (_, index) => ({
+      user_id: 6000 + index,
+      login: `client${String(index)}`,
+      block: 0,
+    }));
+    const ctx = makeCtx({
+      shmList: () => ({ items: 412, limit: 200, offset: 0, data: page }),
+    });
+    const result = (await clientSearch.handler(
+      clientSearch.input.parse({ text: 'client', limit: 200 }),
+      ctx,
+    )) as { warnings: Array<{ code: string }> };
+    expect(result.warnings.map((one) => one.code)).not.toContain('search_limit_ignored');
+  });
+});

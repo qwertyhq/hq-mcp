@@ -195,6 +195,50 @@ describe('billing_adjust: применение денег', () => {
     });
   });
 
+  /**
+   * SHM 3.0 объявила у `PUT /admin/user/payment` закрытый список аргументов —
+   * `user_id`, `money`, `pay_system_id`, `comment`, — а всё остальное v1.cgi
+   * выбрасывает МОЛЧА и отвечает 200. `uniq_key` в список не входит, то есть
+   * единственная защита базы от повторного зачисления исчезает, ничем себя не
+   * выдав: ответ успешный, платёж записан, дедуп не сработает никогда.
+   * Проверяется по ЗАПИСАННОЙ строке, а не по номеру версии.
+   */
+  it('кричит, когда uniq_key до pays_history не доехал (whitelist SHM 3.0)', async () => {
+    const { w } = scene({ payResult: [{ id: 4700, user_id: 3073, money: -100 }] });
+    const built = await plan(w, BALANCE);
+    const result = (await apply(w, BALANCE, built.plan_id)) as {
+      result: { idempotencyStored: boolean | null; idempotencyWarning?: string };
+    };
+    // Строка без uniq_key вовсе — утверждать нечего, и это НЕ «всё хорошо».
+    expect(result.result.idempotencyStored).toBeNull();
+    expect(result.result.idempotencyWarning).toBeUndefined();
+
+    const dropped = scene({
+      payResult: [{ id: 4701, user_id: 3073, money: -100, uniq_key: '' }],
+    });
+    const plan2 = await plan(dropped.w, BALANCE);
+    const out2 = (await apply(dropped.w, BALANCE, plan2.plan_id)) as {
+      result: { idempotencyStored: boolean | null; idempotencyWarning?: string };
+    };
+    expect(out2.result.idempotencyStored).toBe(false);
+    expect(out2.result.idempotencyWarning).toMatch(/ИДЕМПОТЕНТНОСТИ/);
+  });
+
+  it('молчит, когда ключ доехал: поле читается под именем uniq_id', async () => {
+    // Переименование SHM_SAFE_RENAMES: в базе колонка зовётся uniq_key, а
+    // наружу клиента уезжает как uniq_id — без этого редакция съела бы
+    // значение по слову `key`, и проверка читала бы маркер вместо ключа.
+    const { w, state } = scene();
+    const built = await plan(w, BALANCE);
+    const key = `hq:billing_adjust:balance:3073:${built.plan_id}`;
+    state.payResult = [{ id: 4702, user_id: 3073, money: -100, uniq_id: key }];
+    const out = (await apply(w, BALANCE, built.plan_id)) as {
+      result: { idempotencyStored: boolean | null; idempotencyWarning?: string };
+    };
+    expect(out.result.idempotencyStored).toBe(true);
+    expect(out.result.idempotencyWarning).toBeUndefined();
+  });
+
   it('ключ считается ОДИН раз, на этапе плана, и берётся из снимка', async () => {
     const { w } = scene();
     const built = await plan(w, BALANCE);

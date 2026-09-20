@@ -92,6 +92,44 @@ export const clientSearch = defineTool({
 
     let items = primaryOut.items;
 
+    /**
+     * SHM 3.0 БОЛЬШЕ НЕ ПРИНИМАЕТ НАШ `limit` НА ЭТОМ МАРШРУТЕ.
+     *
+     * `/admin/user/search` объявлен в v1.cgi 3.0.43 как
+     * `params => { text }` с `method => 'api_search_for_admins'` и без
+     * `common_params`, а общие списочные параметры (`limit`, `offset`,
+     * `filter`, `sort_*`) впрыскиваются ТОЛЬКО в GET без собственного
+     * `method`. Незадекларированный аргумент при этом не отвергается — он
+     * молча выбрасывается, и ответ 200. То есть `limit=200` уезжает в
+     * никуда, `api_search_for_admins` берёт свой умолчательный 25, и
+     * инструмент, пообещавший двести строк, отдаёт двадцать пять, не
+     * заметив разницы. Пагинации на этом маршруте после 3.0 нет вовсе:
+     * `offset` выбрасывается ровно так же.
+     *
+     * Устанавливается ПО ОТВЕТУ, а не по номеру версии: ровно 25 строк при
+     * запрошенном большем окне и сервером объявленном большем total — это
+     * подпись выброшенного параметра, и она же верна на установке, где
+     * маршрут пропатчен обратно (там страница будет длиннее).
+     */
+    const SEARCH_DEFAULT_LIMIT = 25;
+    if (
+      cap > SEARCH_DEFAULT_LIMIT &&
+      primaryOut.data.length === SEARCH_DEFAULT_LIMIT &&
+      primaryOut.items > SEARCH_DEFAULT_LIMIT
+    ) {
+      warnings.push(
+        warn(
+          'search_limit_ignored',
+          `A limit of ${String(cap)} was asked for and exactly ${String(SEARCH_DEFAULT_LIMIT)} ` +
+            `rows came back out of ${String(primaryOut.items)} the server says match. From SHM ` +
+            '3.0 the search route declares `text` as its only argument, and v1.cgi drops every ' +
+            'undeclared one silently with a 200 — so `limit` and `offset` no longer reach it and ' +
+            'this window cannot be widened or paged from here. Narrow the query text instead, or ' +
+            'resolve the client directly with client_resolve.',
+        ),
+      );
+    }
+
     if (include_blocked) {
       // /admin/user?filter={"block":1} — единственный способ увидеть заблокированных,
       // но текстового поиска там нет, поэтому фильтруем на своей стороне.

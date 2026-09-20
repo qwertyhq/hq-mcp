@@ -3,6 +3,7 @@ import { buildDiff } from '@hq/confirm';
 import { classifyPaymentResult, stampComment, uniqKeyFor } from '@hq/idempotency';
 import { defineMutation, planIdField } from '../kit.js';
 import {
+  UNIQ_KEY_DROPPED_NOTE,
   asRecord,
   assertNoHqTwin,
   findPlanRow,
@@ -10,6 +11,7 @@ import {
   readHistory,
   round2,
   toNumber,
+  uniqKeyLanded,
 } from './money.js';
 import { assertOwnsService } from './ownership.js';
 import type { MutationDeps, MutationTool } from '../kit.js';
@@ -326,10 +328,20 @@ export function billingRefundService(deps: MutationDeps): MutationTool {
           returnedPayId: toNumber(payment.id, 'id платежа из ответа SHM'),
           lastPayIdAtPlan: toNumber(before.lastPayId),
         });
+        const landed = uniqKeyLanded(payment, uniqKey);
         return {
           outcome,
           payment,
           refunded: money,
+          /**
+           * Доехал ли ключ идемпотентности до базы; null — ответ об этом
+           * молчит. Поле НЕ называется *Key намеренно: редакция маскирует по
+           * имени правилом /token|secret|key|password|auth/i, и булев флаг
+           * уехал бы вызывающему маркером '<redacted>' — то есть ответ на
+           * «сработала ли защита от дубля» не читался бы вовсе.
+           */
+          idempotencyStored: landed,
+          ...(landed === false ? { idempotencyWarning: UNIQ_KEY_DROPPED_NOTE } : {}),
           ...(outcome === 'already_applied'
             ? {
                 note:

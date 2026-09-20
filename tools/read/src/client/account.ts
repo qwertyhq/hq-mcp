@@ -7,13 +7,17 @@ import {
   asRecord,
   assertHumanOnly,
   clientExists,
+  emailOfAccounts,
   firstRow,
+  identitySchemaOfRow,
+  lookupAccountsFor,
   num,
   settle,
   str,
   take,
   warn,
 } from '../kit.js';
+import type { IdentitySchema } from '../kit.js';
 
 const ROUTES = {
   email: '/user/email',
@@ -118,6 +122,18 @@ export const clientAccountState = defineTool({
       settle(ctx.shm.get<unknown>(ROUTES.referrals, scope)),
     ]);
 
+    /**
+     * `/user/email` С 3.0 ОТДАЁТ СПИСОК, А НЕ ОДИН АДРЕС.
+     *
+     * До 3.0 маршрут звал `Core::User::get_email` и возвращал один объект
+     * `{email, email_verified}`. С 3.0 он зовёт `get_emails` и возвращает
+     * МАССИВ `{email, email_verified, is_primary}`, отсортированный primary
+     * первым: у клиента их теперь может быть несколько. `firstRow` берёт
+     * первый — то есть основной, — и это правильный ответ на «какая у клиента
+     * почта», но молчать об остальных нельзя: «почта клиента — X» на аккаунте
+     * с двумя адресами отправляет письмо не туда.
+     */
+    const emailRows = asArray(take(emailRes, 'shm', degraded, [] as unknown)).map(asRecord);
     const emailRow = firstRow(take(emailRes, 'shm', degraded, [] as unknown));
     const otpRow = firstRow(take(otpRes, 'shm', degraded, [] as unknown));
     const passkeyRow = firstRow(take(passkeyRes, 'shm', degraded, [] as unknown));
@@ -138,14 +154,50 @@ export const clientAccountState = defineTool({
      * Строка уже прочитана проверкой существования — второго запроса нет.
      */
     const adminRecord = asRecord(presence.row);
-    const adminEmail = str(adminRecord.login2 ?? adminRecord.email);
+    /**
+     * АДМИНСКАЯ ПОЛОВИНА АДРЕСА ПЕРЕЕХАЛА, И БЕЗ ЭТОЙ ВЕТКИ СРАВНЕНИЕ ИСЧЕЗАЕТ
+     * МОЛЧА.
+     *
+     * До 3.0 она лежит в `users.login2` — той же колонке, куда
+     * телеграм-регистрация пишет `@<id>`. С 3.0 колонки нет в
+     * `Core::User::structure` вовсе, то есть `adminRecord.login2` —
+     * `undefined`, `onAdminRecord` — `null`, и предупреждение о расхождении
+     * двух источников не срабатывает НИКОГДА. Выглядит это как «расхождений
+     * нет», хотя на самом деле сравнивать перестали.
+     *
+     * Поэтому на 3.0 вторая сторона берётся оттуда, куда она переехала: из
+     * строк `accounts` этого клиента. Запрос уходит ТОЛЬКО когда `login2` в
+     * строке нет — на 2.19 всё остаётся ровно как было, без лишнего вызова.
+     */
+    const legacyAdminEmail = str(adminRecord.login2 ?? adminRecord.email);
+    let adminEmail = legacyAdminEmail;
+    let adminEmailFrom: 'login2' | 'accounts' | null = legacyAdminEmail === null ? null : 'login2';
+    let identitySchema: IdentitySchema = identitySchemaOfRow(adminRecord);
+    if (identitySchema !== 'legacy') {
+      const accounts = await settle(lookupAccountsFor(ctx, { user_id: shm_user_id }));
+      if (accounts.ok) {
+        identitySchema = accounts.value.schema;
+        if (accounts.value.error !== null) degraded.push({ system: 'shm', error: accounts.value.error });
+        const fromAccounts = emailOfAccounts(accounts.value.accounts);
+        if (fromAccounts !== null) {
+          adminEmail = fromAccounts;
+          adminEmailFrom = 'accounts';
+        }
+      } else {
+        degraded.push({ system: 'shm', error: accounts.error });
+      }
+    }
     const address = str(emailRow.email);
     const email = emailRes.ok
       ? {
           address,
           verified: flag(emailRow.email_verified) ?? false,
-          /** Адрес в админской строке клиента (`users.login2`/`email`). */
+          /** Все адреса, которые маршрут вернул: с 3.0 их бывает несколько. */
+          allAddresses: emailRows.map((row) => str(row.email)).filter((one) => one !== null),
+          /** Адрес в админской половине: `users.login2` до 3.0, `accounts` с 3.0. */
           onAdminRecord: adminEmail,
+          /** Откуда он взят — иначе `null` читается как «в базе пусто». */
+          onAdminRecordFrom: adminEmailFrom,
           /** `null` — сравнивать не с чем: одной из сторон нет. */
           matchesAdminRecord:
             address === null || adminEmail === null
@@ -153,6 +205,19 @@ export const clientAccountState = defineTool({
               : address.toLowerCase() === adminEmail.toLowerCase(),
         }
       : null;
+
+    if (emailRes.ok && emailRows.length > 1) {
+      warnings.push(
+        warn(
+          'email_several_on_file',
+          `This client has ${String(emailRows.length)} email addresses on file, not one — from ` +
+            'SHM 3.0 they are rows of the `accounts` table and a client may hold several. ' +
+            '`address` is the primary one (the route sorts it first); the rest are in ' +
+            '`allAddresses`. Answering "the client\'s email is X" from `address` alone is how a ' +
+            'password reset goes to the address they stopped reading.',
+        ),
+      );
+    }
 
     const otp = otpRes.ok
       ? {
@@ -253,8 +318,9 @@ export const clientAccountState = defineTool({
         warn(
           'email_admin_record_differs',
           `The client-side route reports "${address ?? ''}" and the admin record carries ` +
-            `"${adminEmail ?? ''}". These are two different columns read by two different halves ` +
-            'of this server: `/user/email` is what the client sees and verifies, `users.login2` ' +
+            `"${adminEmail ?? ''}". These are two different places read by two different halves ` +
+            'of this server: `/user/email` is what the client sees and verifies, ' +
+            `${adminEmailFrom === 'accounts' ? 'the `accounts` table (SHM 3.0+)' : '`users.login2`'} ` +
             'is what client_overview, client_search and client_resolve print. Neither is ' +
             'authoritative over the other here — on this installation the admin column also holds ' +
             'telegram logins — so answering "the client\'s email is X" from one of them alone is ' +
@@ -306,6 +372,13 @@ export const clientAccountState = defineTool({
     return {
       userId: shm_user_id,
       exists: true,
+      /**
+       * Где эта SHM держит идентичность клиента: `legacy` — в его строке
+       * (`users.login2`), `accounts` — в отдельной таблице (3.0+), `unknown` —
+       * установить не удалось. Отдаётся наружу потому, что от этого зависит,
+       * чему равно `email.onAdminRecord`, когда оно `null`.
+       */
+      identitySchema,
       email,
       otp,
       fido,

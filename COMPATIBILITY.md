@@ -17,6 +17,7 @@ a specific installation.
 Минимумы базовых инструментов · Base-tool floors: **SHM 2.18.0**, **Remnawave 3.0.0**.
 Проверено на · Verified against: **SHM 2.19.4**, **Remnawave 3.2.3**.
 Новые возможности · New features: **Remnawave 3.3.2**, см. · see [below](#remna-332).
+Разобрано по исходникам · Read off the sources: **SHM 3.0.43** (см. [SHM 3.0](#shm-30)).
 
 <a id="shm-routes"></a>
 
@@ -32,6 +33,7 @@ All upstream. "Since" is the first `danuk/shm` release that carries the route.
 | `GET /admin/config/{key}` | 1.x | `config_read`, `platform_probe`, определение префиксов · prefix resolution |
 | `GET /admin/user` · `POST /admin/user` | 1.x | почти все клиентские · most client-facing tools, `user_flags` |
 | `GET /admin/user/search` | 2.11.3 | `client_search`, `client_resolve` |
+| `GET /admin/user/accounts` | 3.0.0 | `client_resolve`, `client_account_state`, `user_flags` (проба схемы · schema probe) |
 | `GET /admin/user/service` · `/spool` · `/withdraw` · `/categories` | 1.x | `client_overview`, `service_inspect`, `sync_audit`, `service_lifecycle` |
 | `POST /admin/user/service` · `/touch` · `/change` · `/stop` | 1.x | `service_lifecycle` |
 | `GET /admin/user/pay` · `GET /admin/user/bonus` | 1.x | `billing_ledger`, `autopay_inspect`, мутаторы денег · the money mutators |
@@ -224,6 +226,141 @@ integration and shared-list catalogs were accessible and empty. Populated
 catalogs, new writes, mapper restoration and plan/confirmation conflicts are
 tested with local API fixtures. Compatibility checks do not write to a live panel
 or start live GeoCheck jobs.
+
+<a id="shm-30"></a>
+
+## SHM 3.0: две схемы идентичности · SHM 3.0: two identity schemas
+
+Разобрано по исходникам тега `3.0.43` (`app/public_html/shm/v1.cgi`,
+`app/lib/Core/User.pm`, `app/lib/Core/User/Logins.pm`,
+`app/bin/migrations/3.0.0.sql` и `3.0.38.sql`). На работающей 3.0 **не
+проверялось** — всё ниже помечать как прочитанное, а не снятое.
+
+Read off the sources at tag `3.0.43` (files above). **Not** verified against a
+running 3.0 — treat everything below as read, not measured.
+
+### Что переехало · What moved
+
+| До 3.0 · Before 3.0 | С 3.0 · From 3.0 |
+|---|---|
+| `users.login2` (почта И телеграм-логин `@<id>` · email AND the `@<id>` telegram login) | строка `accounts` с `type='email'` · an `accounts` row with `type='email'` |
+| `users.phone` | `accounts` с `type='phone'`, номеров может быть НЕСКОЛЬКО · `type='phone'`, and there may be SEVERAL |
+| `users.settings.email`, `.email_verified` | `accounts.settings.email.verified`; из `users.settings` миграция их ВЫЧИЩАЕТ · the migration REMOVES them from `users.settings` |
+| `users.settings.telegram.user_id` | `accounts` с `type='telegram'`; сам `users.settings.telegram` при этом ОСТАЁТСЯ — шаг 4.3 миграции закомментирован · `users.settings.telegram` STAYS: step 4.3 of the migration is commented out |
+
+`users.login2` миграция `3.0.0.sql` НЕ дропает (DROP закомментирован), но
+колонка снята из `Core::User::structure`, то есть API её больше не отдаёт.
+`users.phone` дропнута миграцией `3.0.38.sql` по-настоящему, а одноимённое
+поле структуры стало ВИРТУАЛЬНЫМ: `list_for_api` склеивает номера клиента из
+`accounts` через запятую, а `Core::User::set` пишет их через
+`_set_legacy_phone`, который умеет ТОЛЬКО ДОБАВИТЬ номер.
+
+The `3.0.0.sql` migration does not actually drop `users.login2` (the DROP is
+commented out), but the column is gone from `Core::User::structure`, so the API
+no longer returns it. `users.phone` really is dropped by `3.0.38.sql`, and the
+same-named structure field became VIRTUAL: `list_for_api` joins the client's
+numbers from `accounts` with commas, and `Core::User::set` writes through
+`_set_legacy_phone`, which can ONLY ADD a number.
+
+### Как это видно инструментам · How the tools see it
+
+Схема устанавливается запросом `GET /admin/user/accounts`, а не номером
+версии: до 3.0 маршрута в роутере нет, и SHM отвечает собственным
+`{"error":"Method not found","status":404}`. Любой другой отказ схему НЕ
+устанавливает — это третий исход (`unknown`), а не «старая». Проба и чтение —
+ОДИН запрос: сервер не перезапускается в момент миграции, и две разные
+стороны перехода могли бы прийтись на два разных запроса. Вердикт «старая»
+кэшируется на минуту (`@hq/shm`, `identity.ts`).
+
+The schema is established by calling `GET /admin/user/accounts`, not by reading
+a version number: below 3.0 that route is not in the router and SHM answers its
+own `{"error":"Method not found","status":404}`. Any other failure does NOT
+establish the schema — that is a third outcome (`unknown`), never "the old one".
+The probe and the read are ONE request, because the server is not restarted at
+the moment of the migration. The "old schema" verdict is cached for a minute.
+
+`accounts.login` — ключ таблицы, поэтому запрос по нему даёт ТОЧНОЕ
+совпадение: это единственный способ ответить «этот адрес принадлежит вот
+этому клиенту» без догадки. `/admin/user/search` на 3.0 ищет по `accounts`
+тоже, но ПОДСТРОКОЙ и в окне, которое расширить больше нельзя (см. ниже).
+
+`accounts.login` is the table key, so asking by it is an EXACT match — the only
+way to answer "this address belongs to this client" without a guess.
+
+### Белый список аргументов · The argument whitelist
+
+`v1.cgi` 3.0 объявляет у каждого маршрута схему `params` и собирает вызов
+ТОЛЬКО из объявленных полей. Незадекларированный аргумент не отвергается — он
+**молча выбрасывается, ответ 200**. Общие списочные параметры (`limit`,
+`offset`, `filter`, `sort_*`) впрыскиваются только в GET без собственного
+`method` (или с `common_params => 1`).
+
+`v1.cgi` 3.0 declares a `params` schema per route and builds the call from the
+declared fields ONLY. An undeclared argument is not rejected — it is **silently
+dropped, HTTP 200**. The common list params are injected only into a GET with
+no `method` of its own (or with `common_params => 1`).
+
+Что это задевает здесь · What that touches here:
+
+| Вызов · Call | Что выброшено · Dropped | Следствие · Consequence |
+|---|---|---|
+| `PUT /admin/user/payment` | `uniq_key` | дедуп `Core::User::payment` не срабатывает никогда; `billing_adjust` и `billing_refund_service` проверяют это по ЗАПИСАННОЙ строке и кричат `idempotencyWarning` · the dedupe never fires; both money mutators check the WRITTEN row and shout |
+| `GET /admin/user/search` | `limit`, `offset` | окно всегда 25 и не листается; `client_search` говорит `search_limit_ignored` · the window is always 25 and cannot be paged |
+| `GET /admin/user/service/spool`, `GET /promo` | `limit` | потолок выбирает SHM, не мы — на ответ не влияет · SHM picks the cap, not us |
+
+`PUT /admin/user/payment` требует `comment` ОБЪЕКТОМ (`type => 'object'`),
+строка теперь 400. Здесь он объектом и уезжал всегда — `stampComment` отдаёт
+`{msg, hq_plan}`, — потому что колонка `comment` обеих денежных таблиц json.
+
+`PUT /admin/user/payment` now requires `comment` to be an OBJECT; a string
+400s. It has always gone out as an object here.
+
+`POST /admin/user/pay` не существует ни в 3.0.43, ни в 2.19.14 — у
+`/admin/user/pay` объявлены только GET и DELETE. Ни один инструмент его не
+зовёт.
+
+`POST /admin/user/pay` exists in neither 3.0.43 nor 2.19.14. No tool calls it.
+
+`/user/email/verify` в 3.0.43 снят; его заменяет `POST /user/email`. Ни один
+инструмент здесь не зовёт ни тот, ни другой: `client_account_state` читает
+`GET /user/email`, а он с 3.0 отдаёт СПИСОК адресов (`get_emails`), а не один.
+
+`/user/email/verify` is gone in 3.0.43, replaced by `POST /user/email`. No tool
+here calls either: `client_account_state` reads `GET /user/email`, which from
+3.0 returns a LIST of addresses (`get_emails`), not one.
+
+### Почта и телефон в колонке, которая зовётся `login` · PII under a field named `login`
+
+`@hq/redact` маскирует PII **по имени поля** (`email`, `phone`, `login2`,
+`full_name`). В `accounts` почта и телефон лежат в колонке `login`, под это
+правило не попадающей, — и попасть она не должна: под тем же именем ездит
+безобидный `users.login`, который печатают все клиентские инструменты.
+Поэтому строка `accounts` раскладывается по полям ПО ТИПУ: `email` для
+`type='email'`, `phone` для `type='phone'`, `login` для остальных
+(`@hq/shm`, `normalizeAccount`). `settings` строки наружу не отдаётся вовсе —
+у типа `login` там лежит `password.hash`.
+
+`@hq/redact` masks PII **by field name**. In `accounts` the email and the phone
+live in a column called `login`, which that rule does not cover — and must not,
+because the harmless `users.login` travels under the same name. So an
+`accounts` row is split by TYPE into the field names the redactor understands.
+The row's `settings` is never returned: for `type='login'` it holds
+`password.hash`.
+
+### Осталось человеку · Left for a human
+
+- `sql_query` — предполётный денилист колонок в шапке модуля называет
+  `users.password` и `users.settings`; на 3.0 к ним добавляется
+  `accounts.settings` (там `password.hash`). Инструмент SQL не исполняет, так
+  что это долг на момент, когда исполнение включат.
+- Проверить всё вышеперечисленное на РАБОТАЮЩЕЙ 3.0: здесь оно прочитано по
+  исходникам.
+
+- `sql_query`'s preflight column denylist names `users.password` and
+  `users.settings`; on 3.0 `accounts.settings` joins them (it holds
+  `password.hash`). The tool executes no SQL, so this is a debt for the day
+  execution is wired.
+- Verify all of the above against a RUNNING 3.0: here it is read off sources.
 
 <a id="fork"></a>
 

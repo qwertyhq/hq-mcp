@@ -94,6 +94,11 @@ const KNOWN_CODES = [
   // — деньги уходят за то, чем никто не пользуется.
   'billed_node_idle',
   'blocked_filter_not_applied',
+  // client_search: SHM 3.0 выбрасывает `limit` на /admin/user/search молча —
+  // окно всегда 25 и не расширяется. Не 'truncated' (там срезано НАШИМ
+  // потолком и потолок можно поднять) и не 'pagination_not_supported'
+  // (template_read: там счётчик лжив, здесь он честен, а окно не двигается).
+  'search_limit_ignored',
   'blocked_filtered_client_side',
   'blocked_hidden',
   'blocked_read_separately',
@@ -223,6 +228,13 @@ const KNOWN_CODES = [
   'service_not_found',
   'services_not_all_diagnosed',
   'shm_blocked_invisible',
+  // client_resolve: с SHM 3.0 почта/телефон/телеграм клиента лежат в таблице
+  // `accounts`, и дочитываются они по одному запросу на клиента. Три кода —
+  // три РАЗНЫХ факта, и слить их нельзя: «нашли там, где поиск не нашёл»,
+  // «до остальных не дошли» и «не установили, какая схема в базе».
+  'shm_found_via_accounts',
+  'identity_partial',
+  'identity_schema_unknown',
   'shm_found_via_user_id',
   'shm_not_fully_read',
   'snapshot_predates_numeric_id',
@@ -381,6 +393,10 @@ const KNOWN_CODES = [
   // client_account_state: почты нет вовсе — против «почта есть, но никем не
   // подтверждена». Разные ответы на «почему клиент не получает письма».
   'email_absent',
+  // client_account_state: с SHM 3.0 адресов у клиента бывает несколько —
+  // это строки таблицы `accounts`, а не одна колонка. Не то же самое, что
+  // email_admin_record_differs (две половины API разошлись в одном адресе).
+  'email_several_on_file',
   'email_unverified',
   // client_account_state: ни OTP, ни passkey. Утверждение ровно о двух
   // механизмах, и предупреждение само называет третий, которого в нём нет.
