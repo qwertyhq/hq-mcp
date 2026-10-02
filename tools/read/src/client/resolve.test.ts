@@ -691,6 +691,15 @@ describe('client_resolve × identity schema (SHM 2.19 vs 3.0)', () => {
     expect(result.shm.count).toBe(2);
   });
 
+  it('publishes the exact accounts hit as match evidence, though the 3.0 row has no email', async () => {
+    // Сравнение по полям строки на 3.0 почту не видит вовсе: её там нет. Без
+    // этого точный владелец адреса уехал бы к боту с exact:false.
+    const result = (await clientResolve.handler({ query: 'petr@example.com' }, ctx30())) as {
+      shm: { matches: Array<{ user_id: number; matchedBy: string | null; exact: boolean }> };
+    };
+    expect(result.shm.matches[0]).toMatchObject({ user_id: 4100, matchedBy: 'email', exact: true });
+  });
+
   it('reads a router 404 as "older than 3.0" and keeps working off login2', async () => {
     const calls: StubCall[] = [];
     const ctx = makeCtx({

@@ -149,16 +149,14 @@ function matchedBy(
   const login = match.login?.toLowerCase() ?? null;
   const email = match.email?.toLowerCase() ?? null;
   if (numeric && match.user_id === Number(q)) return 'shm_user_id';
-  // Точное попадание по таблице accounts (SHM 3.0+) знает свой вид ключа:
-  // почта и телефон с 3.0 в строке клиента не лежат, сравнение ниже их не видит.
-  const viaAccounts = match.user_id > 0 ? exactOwners.get(match.user_id) : undefined;
-  if (viaAccounts) return viaAccounts;
   if (numeric && (match.telegram_id === Number(q) || login === `@${wanted}`)) {
     return 'telegram_id';
   }
   if (login === wanted) return 'login';
   if (email === wanted) return 'email';
-  return null;
+  // Точное попадание по таблице accounts (SHM 3.0+) знает свой вид ключа:
+  // почта и телефон с 3.0 в строке клиента не лежат, сравнение выше их не видит.
+  return (match.user_id > 0 ? exactOwners.get(match.user_id) : undefined) ?? null;
 }
 
 /** Сортировка устойчивая: внутри одной точности порядок SHM сохраняется. */
@@ -619,13 +617,21 @@ export const clientResolve = defineTool({
     // telegram id, то user_id, и на одном клиенте они совпадут), а два
     // одинаковых клиента в ответе — это ещё и два прохода обхода услуг по нему.
     const seen = new Set<number>();
+    // Вид ключа — по той строке accounts, что РАВНА запросу: SHM отвечает
+    // точным совпадением по `login`, но строка-владелец у клиента не одна.
     const exactOwners = new Map<number, ShmMatchedBy>();
+    const wanted = q.toLowerCase();
+    const kindOf = (one: ShmAccount): ShmMatchedBy =>
+      one.kind === 'email' ? 'email' : one.kind === 'telegram' ? 'telegram_id' : 'login';
+    const valueOf = (one: ShmAccount): string =>
+      (one.email ?? one.phone ?? one.login ?? '').toLowerCase();
     for (const one of exactAccounts) {
-      if (one.user_id <= 0 || exactOwners.has(one.user_id)) continue;
-      exactOwners.set(
-        one.user_id,
-        one.kind === 'email' ? 'email' : one.kind === 'telegram' ? 'telegram_id' : 'login',
-      );
+      if (one.user_id > 0 && valueOf(one) === wanted) exactOwners.set(one.user_id, kindOf(one));
+    }
+    for (const one of exactAccounts) {
+      if (one.user_id > 0 && !exactOwners.has(one.user_id)) {
+        exactOwners.set(one.user_id, kindOf(one));
+      }
     }
     const ranked = byExactness(
       rows
