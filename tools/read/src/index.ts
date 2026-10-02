@@ -27,6 +27,7 @@ import { sharedListsRead } from './plugins/sharedLists.js';
 import { promoRead } from './promo/read.js';
 import { provisioningDiagnose } from './provisioning/diagnose.js';
 import { serverInventory } from './server/inventory.js';
+import { serverStatus } from './server/status.js';
 import { serviceInspect } from './service/inspect.js';
 import { spoolInspect } from './spool/inspect.js';
 import { squadsRead } from './squads/read.js';
@@ -109,6 +110,7 @@ export function createReadTools(opts: CreateReadToolsOptions): ToolDef[] {
     clientReach,
     syncAudit,
     countryHealth,
+    serverStatus,
     connectionsInspect,
     trafficStats,
     infraMap,

@@ -78,6 +78,22 @@ const KNOWN_CODES = [
   'shared_list_reference_missing',
   'shared_lists_unused',
   'addresses_masked',
+  // server_status: то, что бот может сказать клиенту про его приложение, и
+  // где этот ответ — оценка. Не hosts_without_country (country_health: хост не
+  // привязан к стране) и не squad_reaches_no_node (squads_read): здесь речь о
+  // том, какие ИМЕНА серверов увидит клиент и насколько им можно верить.
+  'host_mapper_present',
+  'host_order_shuffled',
+  'host_protocol_unknown',
+  'remark_templated',
+  'squads_unread',
+  'subscription_varies_by_squad',
+  // server_status: нода без страны выпадает из `countries`, а панель без единой
+  // такой ноды — это «не знаем», а не «всё упало».
+  'nodes_without_country',
+  'no_nodes_in_panel',
+  // server_status: порог провала онлайна из окружения не разобран — взято умолчание.
+  'status_threshold_invalid',
   'attempts_recorded_none_succeeded',
   'autopay_comment_unreadable',
   'autopay_multiple_live_subscriptions',

@@ -14,7 +14,7 @@ import { buildRuntime } from './index.js';
 const root = mkdtempSync(join(tmpdir(), 'hq-runtime-mut-'));
 
 /** Сколько читающих инструментов даёт план 1 — граница, от которой считается всё остальное. */
-const READ_TOOLS_HUMAN = 37;
+const READ_TOOLS_HUMAN = 38;
 
 function cfg(mode: Access, profile: Profile, extra: Partial<HqMcpConfig> = {}): HqMcpConfig {
   const dir = join(root, `${mode}-${profile}-${String(Math.random()).slice(2)}`);

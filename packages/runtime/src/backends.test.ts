@@ -63,6 +63,7 @@ const REMNA_READ = [
   'node_geocheck',
   'node_integrations_read',
   'panel_activity',
+  'server_status',
   'shared_lists_read',
   'squads_read',
   'subpage_read',

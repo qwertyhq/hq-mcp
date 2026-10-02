@@ -1034,6 +1034,7 @@ const CASES: Case[] = [
   { name: 'subscription_inspect', input: { user_id: 7 } },
   { name: 'sync_audit', input: { limit: 100 } },
   { name: 'country_health', input: { country_code: 'DE' } },
+  { name: 'server_status', input: { country: 'DE' } },
   { name: 'connections_inspect', input: { user_id: 7 } },
   { name: 'traffic_stats', input: { user_id: 7 } },
   { name: 'infra_map', input: {} },
@@ -1254,6 +1255,47 @@ describe('promo_read under the bot profile', () => {
       expect(value.codes[0]?.remaining).toBe(937);
     }
   });
+});
+
+/**
+ * server_status — ИНСТРУМЕНТ, ЧЕЙ ОТВЕТ БОТ ПЕРЕСКАЗЫВАЕТ КЛИЕНТУ ПОЧТИ ДОСЛОВНО.
+ *
+ * Он читает ноды, хосты и сквады — то есть ровно те ответы панели, где лежат
+ * адрес хоста, uuid ноды, тег и приватный ключ Reality инбаунда, — и обязан
+ * вынести из них только имена, коды стран и счётчики. Проверка по значениям в
+ * обоих профилях: маскирование по имени поля здесь ни при чём, полей с такими
+ * именами в ответе быть не должно вовсе. И в обе стороны: имя хоста и ноды
+ * видны, иначе тест зеленел бы на пустом ответе.
+ */
+describe('server_status gives names and counts, never an address', () => {
+  for (const profile of ['human', 'bot'] as Profile[]) {
+    it(`masks nothing and leaks nothing (${profile})`, async () => {
+      const registry = createRegistry(
+        createReadTools({ tunnel, fetchImpl: abuseFetch, probeTcp: makeTcpProbe(true) }),
+      );
+      const result = await executeTool('server_status', {}, { registry, ctx: makeToolCtx(profile) });
+      if (!result.ok) throw new Error(`server_status did not answer: ${result.message}`);
+      expect(maskedPaths(result.value)).toEqual([]);
+      const value = result.value as {
+        countries: Array<{ countryCode: string; nodes: Array<{ name: string }> }>;
+        subscription: { hostsByClient: { base64: string[] } };
+      };
+      expect(value.countries[0]?.nodes[0]?.name).toBe(REMNA_NODE.name);
+      expect(value.subscription.hostsByClient.base64).toEqual([REMNA_HOST.remark]);
+      const text = JSON.stringify(result.value);
+      for (const leak of [
+        REMNA_HOST.address,
+        REMNA_HOST.uuid,
+        REMNA_NODE.uuid,
+        'in-1',
+        'reality-secret',
+        'VLESS',
+        'Main',
+      ]) {
+        expect(text).not.toContain(leak);
+      }
+    });
+  }
 });
 
 /**

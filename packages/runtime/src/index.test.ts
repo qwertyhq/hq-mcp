@@ -47,9 +47,9 @@ beforeEach(() => {
 });
 
 describe('buildRuntime', () => {
-  it('assembles the 37 read tools and a context in ro/human', () => {
+  it('assembles the 38 read tools and a context in ro/human', () => {
     const runtime = buildRuntime(cfg, { fetchImpl: jsonFetch({}).fetchImpl });
-    expect(runtime.registry.list({ mode: 'ro', profile: 'human' })).toHaveLength(37);
+    expect(runtime.registry.list({ mode: 'ro', profile: 'human' })).toHaveLength(38);
     expect(runtime.ctx.profile).toBe('human');
     expect(runtime.ctx.mode).toBe('ro');
     expect(runtime.ctx.probe.get()).toBeNull();
@@ -130,8 +130,8 @@ describe('buildRuntime', () => {
     // Registry.list: в ro их не показывают, в rw показывают. Разница между
     // двумя числами и есть доказательство, что фильтр работает, а не что
     // мутаторов не собрали.
-    expect(stdioLike.registry.list({ mode: 'ro', profile: 'human' })).toHaveLength(37);
-    expect(stdioLike.registry.list({ mode: 'rw', profile: 'human' }).length).toBeGreaterThan(37);
+    expect(stdioLike.registry.list({ mode: 'ro', profile: 'human' })).toHaveLength(38);
+    expect(stdioLike.registry.list({ mode: 'rw', profile: 'human' }).length).toBeGreaterThan(38);
     expect(stdioLike.registry.get('billing_adjust')).toBeDefined();
   });
 

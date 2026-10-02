@@ -110,14 +110,14 @@ is recognised.
 | `GET /api/hwid/devices/top-users` | 2.3.2 | `device_inventory`, `abuse_report` |
 | `POST /api/hwid/devices/delete-all` | 2.1.12 | `subscription_ops` |
 | `POST /api/connections/by-user/{id}` · `/by-node/{uuid}`, `GET /api/connections/by-user/{jobId}` · `/by-node/{jobId}` | 3.0.0 | `connections_inspect` |
-| `GET /api/nodes` · `POST`/`PATCH` · `actions/{enable,disable,restart,reset-traffic}` | 1.3.3 (reset-traffic 1.6.0) | `country_health`, `infra_map`, `node_manage` |
+| `GET /api/nodes` · `POST`/`PATCH` · `actions/{enable,disable,restart,reset-traffic}` | 1.3.3 (reset-traffic 1.6.0) | `country_health`, `server_status`, `infra_map`, `node_manage` |
 | `GET /api/nodes/tags` | 1.6.0 | `node_config_audit` |
-| `GET /api/hosts` · `PATCH` · `DELETE /{uuid}` | 1.3.3 | `country_health`, `infra_map`, `host_edit`, `host_cleanup` |
+| `GET /api/hosts` · `PATCH` · `DELETE /{uuid}` | 1.3.3 | `country_health`, `server_status`, `infra_map`, `host_edit`, `host_cleanup` |
 | `GET /api/config-profiles` · `/inbounds` | 2.0.0 | `infra_map`, `node_manage`, `host_cleanup` |
 | `GET /api/config-profiles/{uuid}/computed-config` | 2.2.4 | `node_config_audit` |
-| `GET /api/internal-squads` · `/{uuid}/accessible-nodes` | 2.0.0 | `squads_read`, `infra_map`, `traffic_stats` |
+| `GET /api/internal-squads` · `/{uuid}/accessible-nodes` | 2.0.0 | `squads_read`, `infra_map`, `traffic_stats`, `server_status` |
 | `GET /api/external-squads` | 2.2.0 | `squads_read` |
-| `GET /api/bandwidth-stats/nodes` · `/internal-squads/{uuid}/usage` · `/users/{id}` | 2.0.0 | `country_health`, `traffic_stats` |
+| `GET /api/bandwidth-stats/nodes` · `/internal-squads/{uuid}/usage` · `/users/{id}` | 2.0.0 | `country_health`, `server_status`, `traffic_stats` |
 | `GET /api/bandwidth-stats/nodes/realtime` | константа, обработчика в 3.3.2 нет · constant only, no 3.3.2 handler | `platform_probe`: 404 → `realtime_route_absent` |
 | `GET /api/bandwidth-stats/nodes/{uuid}/users` | 2.8.0 | `traffic_stats` |
 | `GET /api/node-plugins` · `/{uuid}` · `/torrent-blocker` · `/torrent-blocker/stats` | 2.7.0 | `node_config_audit`, `torrent_reports` |

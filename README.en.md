@@ -194,7 +194,7 @@ Remnawave. Both are not required: each is configured separately, and either one
 alone is a complete configuration. Tools belonging to a system you do not have
 are not published at all — they do not answer emptily, they are absent, and
 `platform_probe` says plainly which backends are configured. So the tool count
-depends on the deployment: panel only 19, SHM only 18, both 37 (more in `rw`).
+depends on the deployment: panel only 20, SHM only 18, both 38 (more in `rw`).
 
 ```bash
 pnpm install
@@ -261,7 +261,7 @@ there is more than one of it. A separate application, configured from the same
 # the label is yours (it is what /metrics shows), the token is at least 24
 # characters: openssl rand -hex 24
 HQ_MCP_HTTP_TOKENS='<label>:<token>' pnpm --filter @hq/http start
-# hq-mcp http ready: url=http://127.0.0.1:42480 mode=ro profile=human tools=37 …
+# hq-mcp http ready: url=http://127.0.0.1:42480 mode=ro profile=human tools=38 …
 ```
 
 Without `HQ_MCP_HTTP_TOKENS` it does not start at all, and it refuses before it
@@ -372,6 +372,7 @@ the safety model below.
 | `infra_map` | Nodes × config profiles × inbounds × hosts × squads, and the gaps between them |
 | `infra_costs` | What the infrastructure costs, joined against the panel: a billed node nobody reaches is money going out |
 | `country_health` | Nodes, online users, traffic and hosts for one country |
+| `server_status` | For the bot: per-country server availability (`ok`/`degraded`/`down` and why) and the server names a customer sees in their app, per subscription format. No addresses, ports or keys |
 | `node_config_audit` | Declared and computed Xray config, plus separate node integrations and shared-list references |
 | `squads_read` | Both squad families: internal squads decide reach, external ones decide how the subscription is presented |
 | `panel_activity` | What is happening to the panel itself: recap, digest, which routes are hit, subscription request history |

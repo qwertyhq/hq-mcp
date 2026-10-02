@@ -22,7 +22,7 @@ const tunnel: TunnelConfig = {
 };
 
 describe('createReadTools', () => {
-  it('builds exactly 37 read tools including the Remnawave 3.3 diagnostics', () => {
+  it('builds exactly 38 read tools including the Remnawave 3.3 diagnostics', () => {
     const names = createReadTools({ tunnel })
       .map((def) => def.name)
       .sort();
@@ -53,6 +53,7 @@ describe('createReadTools', () => {
       'promo_read',
       'provisioning_diagnose',
       'server_inventory',
+      'server_status',
       'service_inspect',
       'shared_lists_read',
       'spool_inspect',
@@ -79,10 +80,10 @@ describe('createReadTools', () => {
 
   it('registers all of them without a name or duplicate complaint', () => {
     const registry = createRegistry(createReadTools({ tunnel }));
-    expect(registry.list({ mode: 'ro', profile: 'human' })).toHaveLength(37);
+    expect(registry.list({ mode: 'ro', profile: 'human' })).toHaveLength(38);
   });
 
-  it('shows the bot exactly the 20 tools of its allowlist and nothing else', () => {
+  it('shows the bot exactly the 21 tools of its allowlist and nothing else', () => {
     // Этот список — контракт между тремя планами: BOT_ALLOWLIST плана 3 обязан
     // совпасть с ним строка в строку, иначе HTTP-профиль и stdio разъедутся.
     const registry = createRegistry(createReadTools({ tunnel }));
@@ -102,6 +103,8 @@ describe('createReadTools', () => {
       'platform_probe',
       'promo_read',
       'provisioning_diagnose',
+      // server_status: доступность серверов и имена в приложении — без адресов.
+      'server_status',
       'service_inspect',
       'spool_inspect',
       'subpage_read',
@@ -120,7 +123,7 @@ describe('createReadTools', () => {
     expect(botNames).not.toContain('server_inventory');
     expect(botNames).not.toContain('infra_costs');
     expect(botNames).not.toContain('client_account_state');
-    expect(botNames).toHaveLength(20);
+    expect(botNames).toHaveLength(21);
   });
 
   it('makes every human-only tool refuse the bot profile in its own handler', async () => {
