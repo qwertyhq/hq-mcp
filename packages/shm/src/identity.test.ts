@@ -74,6 +74,39 @@ describe('normalizeAccount', () => {
     expect(row.login).toBe('x');
   });
 
+  it('never prints the sha256 a token is matched by — only its expiry and IP restriction', () => {
+    // SHM 3.3+: `login` строки token — sha256 токена (Logins::add).
+    const row = normalizeAccount({
+      login: 'a'.repeat(64),
+      type: 'token',
+      user_id: 7,
+      settings: { expire_at: '2026-12-31 00:00:00', allowed_ips: ['198.51.100.0/24'], created: { ip: '1.2.3.4' } },
+    });
+    expect(row).toMatchObject({ kind: 'token', login: null, email: null, phone: null });
+    expect(row.token).toEqual({ expires_at: '2026-12-31 00:00:00', ip_restricted: true });
+    expect(JSON.stringify(row)).not.toContain('a'.repeat(64));
+    expect(JSON.stringify(row)).not.toContain('1.2.3.4');
+
+    const open = normalizeAccount({ login: 'b'.repeat(64), type: 'token', user_id: 7, settings: {} });
+    expect(open.token).toEqual({ expires_at: null, ip_restricted: false });
+  });
+
+  it('files an OAuth login under email, so the bot profile masks it', () => {
+    // google_oauth2 и подобные: логин провайдера — почта клиента.
+    const google = normalizeAccount({ login: 'client@gmail.test', type: 'google_oauth2', user_id: 7 });
+    expect(google).toMatchObject({ kind: 'oauth', type: 'google_oauth2', email: 'client@gmail.test', login: null });
+    expect(google.verified).toBeNull();
+    expect(google.token).toBeUndefined();
+
+    const github = normalizeAccount({ login: 'octocat', type: 'github_oauth2', user_id: 7 });
+    expect(github).toMatchObject({ kind: 'oauth', login: 'octocat', email: null });
+  });
+
+  it('knows a MAX messenger row', () => {
+    const row = normalizeAccount({ login: '555', type: 'max', user_id: 7 });
+    expect(row).toMatchObject({ kind: 'max', login: '555', telegram_id: null });
+  });
+
   it('turns a telegram row into a number as well as a string', () => {
     const row = normalizeAccount({ login: '900002', type: 'telegram', user_id: 7 });
     expect(row.telegram_id).toBe(900002);

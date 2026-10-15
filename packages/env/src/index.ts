@@ -94,7 +94,8 @@ export class ConfigError extends Error {
 const HINTS: Record<string, string> = {
   SHM_BASE_URL: 'Base URL of the SHM API, e.g. https://billing.example.com/shm/v1',
   SHM_ADMIN_AUTH:
-    'SHM admin credentials as "login:password" (encoded to Basic automatically) or a ready "Basic xxx" value',
+    'SHM admin credentials as "login:password" (encoded to Basic automatically), a ready "Basic xxx" value, ' +
+    'or an SHM 3.3+ API token as "Bearer xxx"',
   REMNA_BASE_URL: 'Base URL of the Remnawave panel, e.g. https://panel.example.com',
   REMNA_API_TOKEN: 'Remnawave API token (JWT, role API) — sent as the Bearer authorization header',
   HQ_MCP_GUARD_HOOK_TOKEN:

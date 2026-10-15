@@ -37,6 +37,7 @@ export function maskAuth(value: string): string {
   const trimmed = value.trim();
   if (trimmed === '') return '(empty)';
   if (/^basic\s+/i.test(trimmed)) return `Basic ${maskSecret(trimmed.replace(/^basic\s+/i, ''))}`;
+  if (/^bearer\s+/i.test(trimmed)) return `Bearer ${maskSecret(trimmed.replace(/^bearer\s+/i, ''))}`;
   const colon = trimmed.indexOf(':');
   if (colon <= 0) return maskSecret(trimmed);
   return `${trimmed.slice(0, colon)}:${'•'.repeat(8)}`;

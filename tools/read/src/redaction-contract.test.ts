@@ -508,8 +508,45 @@ const CLIENT_PROMO = [
   },
 ];
 
+/**
+ * Строка `logs_api` SHM 3.x в настоящей форме: секретные аргументы SHM
+ * маскирует сама ДО записи (`***`), почта в аргументах остаётся открытой.
+ */
+const SHM_API_LOG = {
+  user_id: 1,
+  date: '2026-10-15 09:00:00',
+  ip: '203.0.113.40',
+  url: '/shm/v1/user/passwd',
+  method: 'POST',
+  args: { password: '***', login: 'client1' },
+  descr: 'Смена пароля',
+  duration: 41,
+  response_code: 400,
+  response_error: 'OLD_PASSWORD_REQUIRED',
+};
+
+const SHM_SPOOL_QUEUE = {
+  id: 9001,
+  name: 'Рассылка: новый тариф',
+  rate_limit: null,
+  status: 'active',
+  last_executed_at: '2026-10-12 20:58:10',
+  created_at: '2026-10-12 20:56:30',
+  finished_at: '2026-10-12 20:58:10',
+  total_added: 1322,
+  cnt_success: 1300,
+  cnt_fail: 22,
+  cnt_delayed: 0,
+  cnt_stuck: 0,
+  cnt_paused: 0,
+  cnt_skipped: 0,
+  cnt_pending: 0,
+};
+
 function shmList(path: string): unknown {
   if (path === '/admin/promo') return SHM_PROMO;
+  if (path === '/admin/logs/api') return [SHM_API_LOG];
+  if (path === '/admin/spool/queues') return [SHM_SPOOL_QUEUE];
   // Клиентская часть: списочные маршруты.
   if (path === '/user/pay') return [SHM_PAY];
   if (path === '/user/withdraw') return [SHM_WITHDRAW];
@@ -1014,6 +1051,9 @@ const DELIBERATE: Record<string, string[]> = {
   // есть опубликованный контракт инструмента: он перечисляет замаскированное
   // в предупреждении `masked`, чтобы вызывающий не принял маркер за значение.
   config_read: ['value.bot_token'],
+  // Журнал API SHM 3.x: значение там уже `***` — SHM маскирует секретные
+  // аргументы сама ДО записи; редакция исполнителя по имени ключа — второй слой.
+  api_log: ['calls[].args.password'],
 };
 
 interface Case {
@@ -1045,6 +1085,8 @@ const CASES: Case[] = [
   { name: 'torrent_reports', input: {} },
   { name: 'promo_read', input: {} },
   { name: 'spool_inspect', input: { limit: 10 } },
+  { name: 'spool_queues', input: {} },
+  { name: 'api_log', input: { shm_user_id: 1 } },
   { name: 'notify_history', input: { shm_user_id: 1, limit: 10 } },
   { name: 'template_read', input: { id: 'hwid_blocker' } },
   { name: 'config_read', input: { name: 'telegram' } },

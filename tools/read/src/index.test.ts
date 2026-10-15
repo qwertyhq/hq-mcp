@@ -22,12 +22,13 @@ const tunnel: TunnelConfig = {
 };
 
 describe('createReadTools', () => {
-  it('builds exactly 38 read tools including the Remnawave 3.3 diagnostics', () => {
+  it('builds exactly 40 read tools including the Remnawave 3.3 diagnostics and SHM 3.x audit data', () => {
     const names = createReadTools({ tunnel })
       .map((def) => def.name)
       .sort();
     expect(names).toEqual([
       'abuse_report',
+      'api_log',
       'autopay_inspect',
       'billing_ledger',
       'catalog_read',
@@ -57,6 +58,7 @@ describe('createReadTools', () => {
       'service_inspect',
       'shared_lists_read',
       'spool_inspect',
+      'spool_queues',
       'sql_query',
       'squads_read',
       'subpage_read',
@@ -80,7 +82,7 @@ describe('createReadTools', () => {
 
   it('registers all of them without a name or duplicate complaint', () => {
     const registry = createRegistry(createReadTools({ tunnel }));
-    expect(registry.list({ mode: 'ro', profile: 'human' })).toHaveLength(38);
+    expect(registry.list({ mode: 'ro', profile: 'human' })).toHaveLength(40);
   });
 
   it('shows the bot exactly the 21 tools of its allowlist and nothing else', () => {
@@ -136,6 +138,9 @@ describe('createReadTools', () => {
     // нужна», а разница между sync_audit и config_read не в этом.
     const inputs: Record<string, unknown> = {
       abuse_report: {},
+      // api_log: аргументы вызовов несут почту, телефон и логин клиента открыто —
+      // SHM маскирует только секреты.
+      api_log: { shm_user_id: 1 },
       // client_account_state: перечень факторов входа — это карта того, каким
       // из них аккаунт НЕ защищён, плюс адрес почты. Соседний
       // client_billing_view боту открыт: деньги клиента — законный ответ
@@ -166,6 +171,8 @@ describe('createReadTools', () => {
       // вебхуков, ёмкость провижининга и перечень заведённых кредов.
       server_inventory: {},
       sql_query: { target: 'postgres', sql: 'select 1' },
+      // spool_queues: имена очередей — внутренние рассылки и задачи оператора.
+      spool_queues: {},
       // squads_read: сквады раскрывают топологию — ноды, страны, теги
       // инбаундов, — то есть тот же класс, что infra_map.
       squads_read: { accessible_nodes: false },

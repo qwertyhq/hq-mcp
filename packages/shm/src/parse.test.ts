@@ -71,6 +71,11 @@ describe('buildBasicAuth', () => {
     expect(buildBasicAuth('  basic abc123 ')).toBe('basic abc123');
     expect(buildBasicAuth('')).toBe('');
   });
+
+  it('passes an SHM 3.3+ API token through as Bearer, not as a Basic pair', () => {
+    expect(buildBasicAuth('Bearer 0123abcd')).toBe('Bearer 0123abcd');
+    expect(buildBasicAuth('  bearer 0123abcd ')).toBe('bearer 0123abcd');
+  });
 });
 
 describe('toShmListResult', () => {

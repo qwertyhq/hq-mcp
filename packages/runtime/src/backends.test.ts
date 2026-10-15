@@ -32,6 +32,7 @@ const REMNA_ENV = {
 
 /** Читающие инструменты, которым нужен ТОЛЬКО биллинг. */
 const SHM_READ = [
+  'api_log',
   'autopay_inspect',
   'billing_ledger',
   'catalog_read',
@@ -47,6 +48,7 @@ const SHM_READ = [
   'server_inventory',
   'service_inspect',
   'spool_inspect',
+  'spool_queues',
   'template_read',
 ];
 

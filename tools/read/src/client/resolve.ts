@@ -622,7 +622,7 @@ export const clientResolve = defineTool({
     const exactOwners = new Map<number, ShmMatchedBy>();
     const wanted = q.toLowerCase();
     const kindOf = (one: ShmAccount): ShmMatchedBy =>
-      one.kind === 'email' ? 'email' : one.kind === 'telegram' ? 'telegram_id' : 'login';
+      one.email !== null ? 'email' : one.kind === 'telegram' ? 'telegram_id' : 'login';
     const valueOf = (one: ShmAccount): string =>
       (one.email ?? one.phone ?? one.login ?? '').toLowerCase();
     for (const one of exactAccounts) {

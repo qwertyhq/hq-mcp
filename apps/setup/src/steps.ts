@@ -107,9 +107,12 @@ export interface ShmAnswer {
  * видимо, пароль — скрыто, а готовый заголовок распознаётся на месте логина и
  * отменяет второй вопрос.
  */
+/** Готовый заголовок вместо пары: Basic, или Bearer-токен SHM 3.3+. */
+const READY_HEADER = /^(basic|bearer)\s+/i;
+
 async function askShmAuth(ctx: StepContext): Promise<string> {
   const raw = ctx.existing.SHM_ADMIN_AUTH?.trim() ?? '';
-  const ready = /^basic\s+/i.test(raw);
+  const ready = READY_HEADER.test(raw);
   const colon = raw.indexOf(':');
   const login = ready ? raw : colon > 0 ? raw.slice(0, colon) : raw;
   const password = !ready && colon > 0 ? raw.slice(colon + 1) : '';
@@ -117,14 +120,14 @@ async function askShmAuth(ctx: StepContext): Promise<string> {
   const typedLogin = await askValue(ctx.io, {
     key: 'SHM_ADMIN_AUTH (login)',
     description:
-      'the billing admin login. A ready "Basic <base64>" header is accepted here too and skips the password question',
+      'the billing admin login. A ready "Basic <base64>" header or an SHM 3.3+ "Bearer <token>" is accepted here too and skips the password question',
     // Логин показывается КАК ЕСТЬ: он не секрет, а единственное, по чему
     // человек узнаёт, та ли это запись. Под маску уходит только готовый
     // заголовок — в нём пароль лежит целиком, пусть и в base64.
-    maskWith: (value: string): string => (/^basic\s+/i.test(value) ? maskAuth(value) : value),
+    maskWith: (value: string): string => (READY_HEADER.test(value) ? maskAuth(value) : value),
     ...(login === '' ? {} : { current: login }),
   });
-  if (/^basic\s+/i.test(typedLogin)) return typedLogin;
+  if (READY_HEADER.test(typedLogin)) return typedLogin;
 
   const typedPassword = await askValue(ctx.io, {
     key: 'SHM_ADMIN_AUTH (password)',

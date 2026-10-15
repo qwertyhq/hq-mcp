@@ -29,6 +29,12 @@ describe('maskAuth', () => {
     expect(masked).not.toContain('b3BlcmF0b3I6ZXhhbXBsZS1zZWNyZXQ=');
   });
 
+  it('masks an SHM 3.3+ Bearer token whole, without mistaking a colon in it for login:password', () => {
+    const masked = maskAuth('Bearer 9f86d081884c7d659a2feaa0c55ad015');
+    expect(masked.startsWith('Bearer ')).toBe(true);
+    expect(masked).not.toContain('9f86d081884c7d659a2feaa0c55ad015');
+  });
+
   it('falls back to a full mask when there is no login to show', () => {
     expect(maskAuth('single-value-no-colon')).toBe('sin…lon');
   });

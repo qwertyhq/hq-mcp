@@ -1,4 +1,5 @@
 import type { TcpProbe, ToolDef, TunnelConfig } from '@hq/types';
+import { apiLog } from './api/log.js';
 import { autopayInspect } from './billing/autopay.js';
 import { billingLedger } from './billing/ledger.js';
 import { catalogRead } from './catalog/read.js';
@@ -30,6 +31,7 @@ import { serverInventory } from './server/inventory.js';
 import { serverStatus } from './server/status.js';
 import { serviceInspect } from './service/inspect.js';
 import { spoolInspect } from './spool/inspect.js';
+import { spoolQueues } from './spool/queues.js';
 import { squadsRead } from './squads/read.js';
 import { subpageRead } from './subpage/read.js';
 import { subscriptionInspect } from './subscription/inspect.js';
@@ -127,7 +129,9 @@ export function createReadTools(opts: CreateReadToolsOptions): ToolDef[] {
     torrentReports,
     promoRead,
     spoolInspect,
+    spoolQueues,
     notifyHistory,
+    apiLog,
     templateRead,
     configRead,
     createSqlQueryTool(opts.tunnel, { probeTcp: tcp }),

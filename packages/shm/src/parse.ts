@@ -116,11 +116,20 @@ export function dataTruthyGuard(body: unknown): unknown {
   return data;
 }
 
-/** Значение заголовка Authorization: 'login:password' → Basic base64, готовое 'Basic xxx' → как есть. */
+/**
+ * Значение заголовка Authorization: 'login:password' → Basic base64, готовое
+ * 'Basic xxx' или 'Bearer xxx' → как есть.
+ *
+ * Bearer — API-токен SHM 3.3+ (аккаунт типа `token`, SHM.pm `ext_token_auth`).
+ * Ради него и стоит переходить с пароля: токен заводится отдельным аккаунтом,
+ * сужается группой (`accounts.settings.gid`, 3.2+), сроком и `allowed_ips`, и
+ * отзывается без смены пароля админа. На SHM ниже 3.3 Bearer не распознаётся
+ * вовсе — там оставайтесь на `login:password`.
+ */
 export function buildBasicAuth(raw: string): string {
   const value = raw.trim();
   if (value === '') return '';
-  if (/^basic\s+/i.test(value)) return value;
+  if (/^(basic|bearer)\s+/i.test(value)) return value;
   return `Basic ${Buffer.from(value, 'utf8').toString('base64')}`;
 }
 

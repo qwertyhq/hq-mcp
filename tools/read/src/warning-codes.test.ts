@@ -483,6 +483,12 @@ const KNOWN_CODES = [
   // остаётся null, и он единственный, что печатается, когда версия не
   // прочиталась вовсе.
   'shm_healthcheck_route_absent',
+  // api_log / spool_queues: маршрута нет в этой версии SHM (журнал API и
+  // очереди — с 3.0.36). Это факт о версии биллинга, не пустой ответ.
+  'shm_route_absent',
+  // spool_queues: в очереди зависшие задачи — SHM не поставит ей finished_at,
+  // пока их не разберут.
+  'spool_queue_stuck',
   // client_overview и client_resolve: панели здесь нет, поэтому её половина
   // ответа пуста — НИЧЕГО не спрашивали. Не 'card_unavailable' (панель есть,
   // но не ответила — там уместно «повторите») и не 'remna_absence_unproven'

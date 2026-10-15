@@ -31,10 +31,38 @@ export const ACCOUNTS_PATH = '/admin/user/accounts';
 
 export type IdentitySchema = 'accounts' | 'legacy' | 'unknown';
 
-/** Типы строк `accounts`; всё незнакомое — `other`, а не выброшено. */
-export type AccountKind = 'login' | 'email' | 'phone' | 'telegram' | 'other';
+/**
+ * Типы строк `accounts`; всё незнакомое — `other`, а не выброшено.
+ *
+ * С 3.0.43 по 3.6.3 к четырём исходным типам добавились ещё три семейства, и
+ * каждое опасно по-своему, если свалить его в `other` (app/lib/Core/User/Logins.pm,
+ * Core/Auth/OAuth2.pm, Core/Transport/Max.pm, SHM 3.6.3):
+ *
+ *   - `token` (3.3.0, «Добавлены Токены»): API-токен. В колонке `login` лежит
+ *     sha256 самого токена (`Logins::add` — открытый токен отдаётся ОДИН раз
+ *     при создании). Как `other` он уезжал бы наружу полем `login`: хеш не
+ *     секрет сам по себе, но это ровно то значение, по которому SHM узнаёт
+ *     токен (`ext_token_auth`: `id( sha256_hex( $token ), ['token'] )`), и
+ *     печатать его оператору незачем. Наружу — только срок и наличие
+ *     IP-ограничения.
+ *   - `<provider>_oauth2` (`google_oauth2`, `github_oauth2`, `yandex_oauth2`):
+ *     логин внешнего провайдера, и это ПОЧТА клиента. Как `other` она уезжала
+ *     полем `login`, мимо маскирования профиля `bot`.
+ *   - `max` (мессенджер MAX): id пользователя в MAX — аналог `telegram`.
+ */
+export type AccountKind =
+  | 'login'
+  | 'email'
+  | 'phone'
+  | 'telegram'
+  | 'token'
+  | 'oauth'
+  | 'max'
+  | 'other';
 
-const KNOWN_KINDS: readonly AccountKind[] = ['login', 'email', 'phone', 'telegram'];
+const KNOWN_KINDS: readonly AccountKind[] = ['login', 'email', 'phone', 'telegram', 'token', 'max'];
+
+const OAUTH_TYPE = /_oauth2$/;
 
 /**
  * Строка `accounts`, разложенная ПО ИМЕНАМ ПОЛЕЙ, КОТОРЫЕ ПОНИМАЕТ @hq/redact.
@@ -71,6 +99,11 @@ export interface ShmAccount {
   verified: boolean | null;
   /** `primary` из ответа SHM: совпадает ли логин с `users.login`. */
   primary: boolean | null;
+  /**
+   * Только для kind='token': `settings.expire_at` (null — бессрочный) и
+   * задан ли `settings.allowed_ips`. Сам логин токена (sha256) наружу не идёт.
+   */
+  token?: { expires_at: string | null; ip_restricted: boolean };
 }
 
 export interface AccountsLookup {
@@ -140,21 +173,34 @@ export function normalizeAccount(row: Record<string, unknown>): ShmAccount {
   const rawType = text(row.type) ?? 'login';
   const kind: AccountKind = (KNOWN_KINDS as readonly string[]).includes(rawType)
     ? (rawType as AccountKind)
-    : 'other';
+    : OAUTH_TYPE.test(rawType)
+      ? 'oauth'
+      : 'other';
   const login = text(row.login);
   const userId = Number(row.user_id);
   const settings = settingsOf(row.settings);
   const telegramId = kind === 'telegram' && login !== null ? Number(login) : Number.NaN;
+  // Провайдер мог отдать не почту (логин GitHub) — тогда это логин, а не email.
+  const asEmail = kind === 'email' || (kind === 'oauth' && login !== null && login.includes('@'));
+  const allowedIps = settings.allowed_ips;
   return {
     kind,
     type: rawType,
     user_id: Number.isFinite(userId) ? userId : 0,
-    login: kind === 'email' || kind === 'phone' ? null : login,
-    email: kind === 'email' ? login : null,
+    login: asEmail || kind === 'phone' || kind === 'token' ? null : login,
+    email: asEmail ? login : null,
     phone: kind === 'phone' ? login : null,
     telegram_id: Number.isFinite(telegramId) ? telegramId : null,
     verified: kind === 'email' ? (flag(asRecord(settings.email).verified) ?? false) : null,
     primary: flag(row.primary),
+    ...(kind === 'token'
+      ? {
+          token: {
+            expires_at: text(settings.expire_at),
+            ip_restricted: Array.isArray(allowedIps) && allowedIps.length > 0,
+          },
+        }
+      : {}),
   };
 }
 

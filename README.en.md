@@ -136,7 +136,10 @@ the login, email, phone and telegram binding moved out of the client row into an
 `accounts` table, and `v1.cgi` began silently dropping undeclared arguments. The
 tools work on BOTH schemas and establish the live one from SHM's own answer, not
 from a version number; what moved, what that breaks and what is left for a human
-are in [COMPATIBILITY.md](COMPATIBILITY.md#shm-30).
+are in [COMPATIBILITY.md](COMPATIBILITY.md#shm-30). The 3.0.43 → 3.6.3 changes
+(permission groups, API tokens, the API log, mass-task queues, new account types)
+are covered there too, in [SHM 3.6](COMPATIBILITY.md#shm-36); on SHM 3.3+
+`SHM_ADMIN_AUTH` accepts an API token as `Bearer <token>`.
 
 Checking takes one call — the same `platform_probe`. When a version is below its
 floor it answers with a `backend_version_below_minimum` warning naming the
@@ -194,7 +197,7 @@ Remnawave. Both are not required: each is configured separately, and either one
 alone is a complete configuration. Tools belonging to a system you do not have
 are not published at all — they do not answer emptily, they are absent, and
 `platform_probe` says plainly which backends are configured. So the tool count
-depends on the deployment: panel only 20, SHM only 18, both 38 (more in `rw`).
+depends on the deployment: panel only 20, SHM only 20, both 40 (more in `rw`).
 
 ```bash
 pnpm install
@@ -261,7 +264,7 @@ there is more than one of it. A separate application, configured from the same
 # the label is yours (it is what /metrics shows), the token is at least 24
 # characters: openssl rand -hex 24
 HQ_MCP_HTTP_TOKENS='<label>:<token>' pnpm --filter @hq/http start
-# hq-mcp http ready: url=http://127.0.0.1:42480 mode=ro profile=human tools=38 …
+# hq-mcp http ready: url=http://127.0.0.1:42480 mode=ro profile=human tools=40 …
 ```
 
 Without `HQ_MCP_HTTP_TOKENS` it does not start at all, and it refuses before it
@@ -354,6 +357,8 @@ the safety model below.
 |---|---|
 | `service_inspect` | One client's services: status, expiry, the scheduled next tariff, the spool tasks attached to each |
 | `spool_inspect` | The provisioning queue: stuck, failed, paused, and the real depth |
+| `spool_queues` | SHM 3.0.36+: mass-task queues (broadcasts, `job_users`) with SHM's own counters — did the broadcast reach everyone, and where it got stuck |
+| `api_log` | SHM 3.0.36+: the SHM API call log — who called which route, with which arguments, and how it ended. "What did the client do in the cabinet before complaining" |
 | `provisioning_diagnose` | "Paid, but there is no config" — per service, not per client |
 | `sync_audit` | Batch reconciliation of billing against the panel, both sides paged to completeness |
 | `notify_history` | Whether the client was actually told, and if not, why — the delivery verdict nothing else surfaces |

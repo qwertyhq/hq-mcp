@@ -17,7 +17,7 @@ a specific installation.
 Минимумы базовых инструментов · Base-tool floors: **SHM 2.18.0**, **Remnawave 3.0.0**.
 Проверено на · Verified against: **SHM 2.19.4**, **Remnawave 3.2.3**.
 Новые возможности · New features: **Remnawave 3.3.2**, см. · see [below](#remna-332).
-Разобрано по исходникам · Read off the sources: **SHM 3.0.43** (см. [SHM 3.0](#shm-30)).
+Разобрано по исходникам · Read off the sources: **SHM 3.6.3** (см. [SHM 3.0](#shm-30) и [SHM 3.6](#shm-36)).
 
 <a id="shm-routes"></a>
 
@@ -40,6 +40,8 @@ All upstream. "Since" is the first `danuk/shm` release that carries the route.
 | `PUT /admin/user/payment` · `PUT /admin/user/bonus` | 1.x | `billing_adjust`, `billing_refund_service` |
 | `GET /admin/spool` · `/history` | 1.x | `spool_inspect`, `notify_history`, `provisioning_diagnose` |
 | `GET /admin/spool/statuses` | 1.13.1 | `platform_probe`, `spool_inspect` |
+| `GET /admin/spool/queues` | 3.0.36 (миграция · migration 3.0.23) | `spool_queues` |
+| `GET /admin/logs/api` | 3.0.36 (миграция · migration 3.0.14) | `api_log` |
 | `POST /admin/spool/manual/{retry,resume,pause}` | 1.9.1 | `provisioning_repair` |
 | `GET /admin/storage/manage[/{name}]` · `PUT` · `POST` | 1.x | `provisioning_diagnose`, `storage_edit` |
 | `GET /admin/template` · `POST /admin/template` | 1.x | `template_read`, `template_edit` |
@@ -361,6 +363,53 @@ The row's `settings` is never returned: for `type='login'` it holds
   `password.hash`). The tool executes no SQL, so this is a debt for the day
   execution is wired.
 - Verify all of the above against a RUNNING 3.0: here it is read off sources.
+
+<a id="shm-36"></a>
+
+## SHM 3.6: что добавилось после 3.0.43 · What changed after 3.0.43
+
+Разобрано по исходникам тега `3.6.3` (diff `3.0.43..3.6.3`: `v1.cgi`,
+`SHM.pm`, `Core/User.pm`, `Core/User/{Logins,Groups,Passwd}.pm`,
+`Core/Logs/Api.pm`, `Core/SpoolQueue.pm`, миграции `3.2.1`, `3.5.0`). На
+работающей 3.6 **не проверялось**.
+
+Read off the sources at tag `3.6.3` (diff `3.0.43..3.6.3`, files above).
+**Not** verified against a running 3.6.
+
+### Что из этого видят инструменты · What the tools pick up
+
+| Изменение · Change | С версии · Since | Что сделано здесь · What this project does |
+|---|---|---|
+| API-токены: аккаунт `type='token'`, вход `Authorization: Bearer` (`SHM.pm` `ext_token_auth`), срок `expire_at`, `allowed_ips` | 3.3.0 | `SHM_ADMIN_AUTH` принимает `Bearer <token>` как есть · accepts `Bearer <token>` as is. Строка `token` в `accounts` → kind `token`; её `login` (это sha256 токена) наружу не идёт, только `token.expires_at` / `token.ip_restricted` · the row's `login` (the token's sha256) is never returned |
+| OAuth2-аккаунты `<provider>_oauth2` (логин — почта клиента) · login is the client's email | 3.0.36 | kind `oauth`, значение в поле `email` — чтобы профиль `bot` его маскировал · filed under `email` so the `bot` profile masks it. Раньше уезжало `other` → `login`, мимо маскирования · previously went out as `other` → `login`, unmasked |
+| Мессенджер MAX: аккаунт `type='max'` | 3.0.36 | kind `max` |
+| Группы прав `user_groups` (`is_admin`, `default_policy`, `rules` по uri+method); `users.gid` по умолчанию 2 (`users`) · permission groups | 3.2.0 (IP-ограничения аккаунтов · account IP limits — 3.4.0) | `gid` по-прежнему в `FORBIDDEN_USER_FIELDS` — смена группы и есть выдача админки · changing it IS granting admin. Креды hq-mcp можно держать в группе с `default_policy: deny` и разрешёнными только нужными маршрутами: отказ придёт `403`, а не тихим пустым ответом · a deny-group yields loud `403`s |
+| Журнал API `logs_api` | 3.0.36 | `api_log`, только `human` (аргументы несут почту/телефон; секреты SHM маскирует сама до записи · secrets are masked by SHM before writing) |
+| Очереди массовых задач `spool_queues` | 3.0.36 | `spool_queues`, только `human` |
+| `GET /user/email` отдаёт СПИСОК адресов · returns a LIST | 3.0.36 | уже учтено в `client_account_state` · already handled |
+| `/admin/service/children`: `children` — `array` вместо `object` | 3.4.0 | инструменты этот маршрут только читают · read-only here, unaffected |
+| `/public/*` игнорирует `?user_id=` (контекст всегда user 1) · ignores `?user_id=` | 3.1.0 | инструменты `/public` не зовут · not called here. Шаблонам установки, которые на это опирались, — проверить · installations whose public templates relied on it must check them |
+| Сессии хранятся sha256-хешем, миграция `3.5.0` чистит `sessions` целиком · sessions purged | 3.5.0 | не задевает: hq-mcp ходит с Basic/Bearer, не сессией |
+| `/user/passwd` требует `old_password`, если пароль уже есть; `/admin/user/passwd` — нет · requires `old_password` | 3.0.36 | мутаторы паролей не меняют · no password mutators here |
+| Новые Telegram-логины — голый id без `@` (`get_shm_login`), `login_prefix` выпилен · bare id, no `@` | 3.0.36 | поиск по `@<id>` у новых клиентов не найдёт строку `users.login`; `client_resolve` ищет и по `accounts` (`telegram`) · `client_resolve` also searches `accounts` |
+| `user.login` в шаблонах возвращал логин ВХОДА, а не основной · returned the sign-in login | 3.0.0–3.6.2, исправлено в 3.6.3 · fixed in 3.6.3 | шаблоны установки: не обновляться на 3.0–3.6.2 · templates: skip 3.0–3.6.2 |
+
+### Осталось человеку · Left for a human
+
+- Токен с узкой группой — правильный способ дать hq-mcp доступ на 3.3+, но
+  токен не умеет большего, чем его группа: инструмент, которому группа не дала
+  маршрут, ответит `403`. Состав маршрутов по инструментам — таблица
+  [Маршруты SHM](#shm-routes).
+- `/admin/user/passwd` принимает любой `user_id`, включая админа: токен с этим
+  маршрутом в группе — это сброс пароля кому угодно. Админские аккаунты стоит
+  ограничить по IP (`accounts.settings.allowed_ips`).
+
+- A narrowly-grouped token is the right way to give hq-mcp access on 3.3+, but a
+  token can do no more than its group: a tool whose route the group withholds
+  answers `403`. See [SHM routes](#shm-routes) for which tool calls what.
+- `/admin/user/passwd` accepts any `user_id`, admins included: a token whose
+  group allows it can reset anyone's password. Restrict admin accounts by IP
+  (`accounts.settings.allowed_ips`).
 
 <a id="fork"></a>
 
